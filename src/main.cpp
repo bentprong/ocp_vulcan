@@ -1,21 +1,22 @@
 #include <Arduino.h>
+#include "Wire.h"
 #include "float.h"
 
 const char hello[] = "\r\nDell OCP Led Text Fixture (LTF)\r\n";
 const char cliPrompt[] = "\r\nltf> ";
 const int promptLen = sizeof(cliPrompt);
 
-#define SPECTRA_COLOR_OUT_PIN       A3
-#define SPECTRA_INTENSITY_OUT_PIN   A2
+#define SPECTRA_COLOR_OUT_PIN       ADC_INPUTCTRL_MUXPOS_PIN3_Val
+#define SPECTRA_INTENSITY_OUT_PIN   ADC_INPUTCTRL_MUXPOS_PIN2_Val
+#define AT30TS74_I2C_ADDR           72 // 0x48
+
 #define CMD_NAME_MAX        12
 #define MAX_LINE_SZ         80
 #define OUTBFR_SIZE         (MAX_LINE_SZ*3)
 
-
-
 // Versions
-// 1.1.x was MPLAB
-// 1.2.x is PlatformIO/VSCode
+// 1.1.x was MPLAB (2022)
+// 1.2.x is PlatformIO/VSCode (2023)
 #define VERSION             "1.2.1"
 
 typedef struct {
@@ -33,14 +34,18 @@ int LEDRawRead(int);
 int rawRead(int);
 int vers(int);
 int readLoop(int);
+int readTemp(int);
+int debug(int);
 
 static char                *tokens[4];
 
 cli_entry           cmdTable[] = {
-    {"help",       help, 0, "Help for the help command\r\n", "help line 2\r\n"},
-    {"loop",   readLoop, 0, "Continuous loop reading raw data\r\n"},
-    {"read", LEDRawRead, 0, "Read LED temperature.\r\n", "Reports temp in degrees C.\r\n"},
-    {"vers",       vers, 0, "Displays software version\r\n", "vers line 2\r\n"},
+    {"debug",     debug, 0, "Debug functions for developer use only.", "Use caution if not a developer!"},
+    {"help",       help, 0, "Help for the help command", "help line 2"},
+    {"loop",   readLoop, 0, "Continuous loop reading raw data", "Hit any key to exit loop"},
+    {"read", LEDRawRead, 0, "Read LED temperature.", "Reports temp in degrees C."},
+    {"temp", readTemp, 0, "Read MCU and board temperature sensors.", "Reports temps in degrees C"},
+    {"vers",       vers, 0, "Displays software version", "vers line 2"},
 };
 
 #define CLI_ENTRIES     (sizeof(cmdTable) / sizeof(cli_entry))
@@ -74,11 +79,13 @@ bool cli(char *raw)
     strcpy(input, (char *) raw);
     len = strlen(input);
 
-    // initial call, should get command else table lookup below will fail
+    // initial call, should get and save the command as 0th token
     token = strtok(input, delim);
     tokens[tokNdx++] = token;
 
-    // subsequent calls, should parse any args
+    // subsequent calls, should parse any space-separated args into tokens[]
+    // note that what's stored in tokens[] are string pointers into the
+    // input array
     while ( (token = (char *) strtok(NULL, delim))  != NULL )
     {
         tokens[tokNdx++] = token;
@@ -95,10 +102,73 @@ bool cli(char *raw)
         }
     }
 
+    if ( rc == false )
+    {
+        terminalOut("Invalid command");
+    }
+
     doPrompt();
     return(rc);
 
 } // cli()
+
+void debug_scan(void)
+{
+  Serial.println ("Scanning I2C bus...");
+  byte        count = 0;
+
+  for (byte i = 8; i < 120; i++)
+  {
+    Wire.beginTransmission(i);
+    if (Wire.endTransmission() == 0)
+    {
+      SerialUSB.print ("Found address: ");
+      SerialUSB.print (i, DEC);
+      SerialUSB.print (" (0x");
+      SerialUSB.print (i, HEX);
+      SerialUSB.println (")");
+      count++;
+      delay (1);  
+    } 
+  } 
+
+  SerialUSB.println ("Scan Complete.");
+  if ( count )
+  {
+    SerialUSB.print ("Found ");
+    SerialUSB.print (count, DEC);
+    SerialUSB.println (" I2C device(s).");
+  }
+  else
+  {
+    SerialUSB.println("No I2c device found");
+  }
+}
+
+void debug_reset(void)
+{
+  NVIC_SystemReset();
+}
+
+int debug(int arg)
+{
+    char        outBfr[80];
+
+#if 0
+// uncomment to debug a debug function ;-)
+    if ( arg )
+    {
+      sprintf(outBfr, "Arg: %d Token: %s", arg, tokens[1]);
+      terminalOut(outBfr);
+    }
+#endif
+
+    if ( strcmp(tokens[1], "scan") == 0 )
+      debug_scan();
+    else if ( strcmp(tokens[1], "reset") == 0 )
+      debug_reset();
+
+}
 
 static void syncADC() 
 {
@@ -225,9 +295,35 @@ int LEDRawRead(int arg)
 
 } // LEDRawRead()
 
+
+int readTemp(int arg)
+{
+  signed char         i2cData;
+  short int           curTemp;
+  float               degF;
+  char                outBfr[80];
+
+  Wire.beginTransmission(AT30TS74_I2C_ADDR);
+  Wire.write(0);      // set pointer register
+  Wire.endTransmission();
+  delay(65);
+  Wire.requestFrom(AT30TS74_I2C_ADDR, 1, false);
+
+  // read MSB only - sufficient for this project
+  i2cData = Wire.read();
+
+  // data is two's complement so nothing need be done
+  curTemp = (short) i2cData;
+  degF = ((curTemp * 9.0) / 5.0) + 32.0;
+
+  sprintf(outBfr, "Sensor temp: %d C (%d F)", curTemp, (int) degF);
+  terminalOut(outBfr);
+
+  return(0);
+}
+
 int readLoop(int arg)
 {
-  int       byteIn;
   bool      loopControl = true;
 
   SerialUSB.println("Entering continuous loop, hit any key to stop");
@@ -236,7 +332,7 @@ int readLoop(int arg)
   {
     if ( SerialUSB.available() )
     {
-      byteIn = SerialUSB.read();
+      (void) SerialUSB.read();
       loopControl = false;
     }
     else
@@ -260,8 +356,10 @@ int help(int arg)
     {
         sprintf(outBfr, "%s\r\n", cmdTable[i].cmd);
         terminalOut(outBfr);
-        terminalOut(cmdTable[i].help1);
-        terminalOut(cmdTable[i].help2);
+        sprintf(outBfr, "\t%s\r\n", cmdTable[i].help1);
+        terminalOut(outBfr);
+        sprintf(outBfr, "\t%s\r\n", cmdTable[i].help2);
+        terminalOut(outBfr);
     }
 
     return(0);
@@ -295,11 +393,12 @@ void setup()
   PORT->Group[1].PMUX[4].reg = PORT_PMUX_PMUXO_B;
 
   ADC_Init();
+  Wire.begin();
 
   SerialUSB.begin(115200);
   while ( !SerialUSB )
   {
-    ; // wait for USBSerial()
+    ; // wait for SerialUSB() to start TODO: Timeout?
   }
 
   SerialUSB.println(hello);
