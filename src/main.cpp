@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "Wire.h"
 #include "float.h"
+#include <FlashStorage.h>
 
 const char hello[] = "\r\nDell OCP Led Text Fixture (LTF)\r\n";
 const char cliPrompt[] = "\r\nltf> ";
@@ -41,11 +42,11 @@ static char                *tokens[4];
 
 cli_entry           cmdTable[] = {
     {"debug",     debug, 0, "Debug functions for developer use only.", "Use caution if not a developer!"},
-    {"help",       help, 0, "Help for the help command", "help line 2"},
-    {"loop",   readLoop, 0, "Continuous loop reading raw data", "Hit any key to exit loop"},
-    {"read", LEDRawRead, 0, "Read LED temperature.", "Reports temp in degrees C."},
-    {"temp", readTemp, 0, "Read MCU and board temperature sensors.", "Reports temps in degrees C"},
-    {"vers",       vers, 0, "Displays software version", "vers line 2"},
+    {"help",       help, 0, "Help for the help command.", NULL},
+    {"loop",   readLoop, 0, "Continuous loop reading raw data.", "Hit any key to exit loop."},
+    {"read", LEDRawRead, 0, "Read LED color temperature and intensity.", NULL},
+    {"temp",   readTemp, 0, "Reads board temperature sensor.", "Reports temperature in degrees C and F."},
+    {"vers",       vers, 0, "Displays software version.", NULL},
 };
 
 #define CLI_ENTRIES     (sizeof(cmdTable) / sizeof(cli_entry))
@@ -83,9 +84,9 @@ bool cli(char *raw)
     token = strtok(input, delim);
     tokens[tokNdx++] = token;
 
-    // subsequent calls, should parse any space-separated args into tokens[]
+    // subsequent calls should parse any space-separated args into tokens[]
     // note that what's stored in tokens[] are string pointers into the
-    // input array
+    // input array not the actual string token itself
     while ( (token = (char *) strtok(NULL, delim))  != NULL )
     {
         tokens[tokNdx++] = token;
@@ -93,7 +94,7 @@ bool cli(char *raw)
 
     for ( int i = 0; i < CLI_ENTRIES; i++ )
     {
-        if ( strncmp(s, cmdTable[i].cmd, len) == 0 )
+        if ( strncmp(tokens[0], cmdTable[i].cmd, len) == 0 )
         {
             // command funcs are passed arg count, tokens are global
             (cmdTable[i].func) (tokNdx);
@@ -114,15 +115,16 @@ bool cli(char *raw)
 
 void debug_scan(void)
 {
-  Serial.println ("Scanning I2C bus...");
   byte        count = 0;
+
+  SerialUSB.println ("Scanning I2C bus...");
 
   for (byte i = 8; i < 120; i++)
   {
     Wire.beginTransmission(i);
     if (Wire.endTransmission() == 0)
     {
-      SerialUSB.print ("Found address: ");
+      SerialUSB.print ("Found device at address ");
       SerialUSB.print (i, DEC);
       SerialUSB.print (" (0x");
       SerialUSB.print (i, HEX);
@@ -147,6 +149,9 @@ void debug_scan(void)
 
 void debug_reset(void)
 {
+  SerialUSB.println("Board reset will disconnect USB-serial connection.");
+  SerialUSB.println("Repeat whatever steps you took to connect to the board.");
+  delay(1000);
   NVIC_SystemReset();
 }
 
@@ -274,7 +279,7 @@ int LEDRawRead(int arg)
 
     vC = maxVolts * ((float) colorRaw / maxAdcBits);
     lv = (vC + 4) * 100.0;
-    SerialUSB.print("    Color: ");
+    SerialUSB.print("     Color: ");
     SerialUSB.print(lv, 4);
     SerialUSB.print(" nm [raw: 0x");
     SerialUSB.print(colorRaw, HEX);
@@ -283,7 +288,7 @@ int LEDRawRead(int arg)
     SerialUSB.println(" V]");
 
     vI = maxVolts * ((float) intensRaw / maxAdcBits);
-    SerialUSB.print("Intensity: ");
+    SerialUSB.print(" Intensity: ");
     SerialUSB.print(intensRaw);
     SerialUSB.print("         [raw: 0x");
     SerialUSB.print(intensRaw, HEX);
@@ -316,31 +321,28 @@ int readTemp(int arg)
   curTemp = (short) i2cData;
   degF = ((curTemp * 9.0) / 5.0) + 32.0;
 
-  sprintf(outBfr, "Sensor temp: %d C (%d F)", curTemp, (int) degF);
-  terminalOut(outBfr);
+  SerialUSB.print("Board temp: ");
+  SerialUSB.print(curTemp);
+  SerialUSB.print(" C/");
+  SerialUSB.print((int) degF, DEC);
+  SerialUSB.println(" F");
 
   return(0);
 }
 
 int readLoop(int arg)
 {
-  bool      loopControl = true;
+  SerialUSB.println("Entering continuous loop, press any key to stop");
 
-  SerialUSB.println("Entering continuous loop, hit any key to stop");
-
-  while ( loopControl == true )
+  while ( SerialUSB.available() == 0 )
   {
-    if ( SerialUSB.available() )
-    {
-      (void) SerialUSB.read();
-      loopControl = false;
-    }
-    else
-    {
-      LEDRawRead(0);
-      delay(1000);
-    }
+    LEDRawRead(0);
+    readTemp(0);
+    delay(1000);
   }
+
+  while ( SerialUSB.available() )
+    (void) SerialUSB.read();
 
   return(0);
 }
@@ -349,17 +351,26 @@ int help(int arg)
 {
     char        outBfr[80];
     
-    sprintf(outBfr, "Commands Available:\r\n");
-    terminalOut(outBfr);
+    SerialUSB.println("Enter a command then press ENTER. Some commands allow arguments");
+    SerialUSB.println("which must be separated from the command and other arguments by");
+    SerialUSB.println("a space.  Up arrow repeats the last command; backspace or delete");
+    SerialUSB.println("erases the last character entered.");
+    SerialUSB.println("Commands Available:");
 
     for ( int i = 0; i < CLI_ENTRIES; i++ )
     {
-        sprintf(outBfr, "%s\r\n", cmdTable[i].cmd);
-        terminalOut(outBfr);
-        sprintf(outBfr, "\t%s\r\n", cmdTable[i].help1);
-        terminalOut(outBfr);
+      if ( strcmp(cmdTable[i].cmd, "help") == 0 )
+        continue;
+
+      sprintf(outBfr, "%s\r\n", cmdTable[i].cmd);
+      terminalOut(outBfr);
+      sprintf(outBfr, "\t%s\r\n", cmdTable[i].help1);
+      terminalOut(outBfr);
+      if ( cmdTable[i].help2 != NULL )
+      {
         sprintf(outBfr, "\t%s\r\n", cmdTable[i].help2);
         terminalOut(outBfr);
+      }
     }
 
     return(0);
@@ -380,6 +391,8 @@ int vers(int arg)
 
 void setup() 
 {
+  bool      LEDstate = false;
+
   // configure pins AIN2 & AIN3 (PB08 & PB09)
   // NOTE: Group 1 = PB
   PORT->Group[1].DIRCLR.reg = PORT_PB09 | PORT_PB09;
@@ -392,24 +405,45 @@ void setup()
   PORT->Group[1].PMUX[3].reg = PORT_PMUX_PMUXO_B;
   PORT->Group[1].PMUX[4].reg = PORT_PMUX_PMUXO_B;
 
+  // configure heartbeat LED pin and turn on
+  pinMode(PIN_LED, OUTPUT);
+  digitalWrite(PIN_LED, LEDstate);
+
   ADC_Init();
   Wire.begin();
 
   SerialUSB.begin(115200);
   while ( !SerialUSB )
   {
-    ; // wait for SerialUSB() to start TODO: Timeout?
+    LEDstate = LEDstate ? 0 : 1;
+    digitalWrite(PIN_LED, LEDstate);
+    delay(200);
   }
 
   SerialUSB.println(hello);
   doPrompt();
 }
 
+// FLASHING NOTE: loop() doesn't get called until USB-serial connection
+// has been established (ie, SerialUSB = 1).
 void loop() 
 {
   int             byteIn;
   static char     inBfr[80];
   static int      inCharCount = 0;
+  static char     lastCmd[80] = {0};
+  const char      bs[4] = {0x1b, '[', '1', 'D'};  // terminal: backspace seq
+  const char      cl[4] = {0x1b, '[', '2', 'K'};  // terminal: clear line seq
+  static bool     LEDstate = false;
+  static uint32_t time = millis();
+
+  // blink heartbeat LED
+  if ( millis() - time >= 1000  )
+  {
+      time = millis();
+      LEDstate = LEDstate ? 0 : 1;
+      digitalWrite(PIN_LED, LEDstate);
+  }
 
   if ( SerialUSB.available() )
   {
@@ -421,10 +455,41 @@ void loop()
       SerialUSB.println(" ");
       inBfr[inCharCount] = 0;
       inCharCount = 0;
+      strcpy(lastCmd, inBfr);
       cli(inBfr);
+    }
+    else if ( byteIn == 0x1b )
+    {
+      if ( SerialUSB.available() )
+      {
+        byteIn = SerialUSB.read();
+        if ( byteIn == '[' )
+        {
+          if ( SerialUSB.available() )
+          {
+            byteIn = SerialUSB.read();
+            if ( byteIn == 'A' )
+            {
+              doPrompt();
+              terminalOut(lastCmd);
+              cli(lastCmd);
+            }
+          }
+        }
+      }
+    }
+    else if ( byteIn == 127 || byteIn == 8 )
+    {
+      // delete & backspace
+      inBfr[inCharCount] = 0;
+      inCharCount--;
+      SerialUSB.write(bs, 4);
+      SerialUSB.write(' ');
+      SerialUSB.write(bs, 4);
     }
     else
     {
+      // all other keys get stored in buffer
       SerialUSB.write((char) byteIn);
       inBfr[inCharCount++] = byteIn;
     }
