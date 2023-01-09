@@ -1,9 +1,14 @@
 #include <Arduino.h>
 #include "Wire.h"
 #include "float.h"
-#include <FlashStorage.h>
+#include "FlashAsEEPROM_SAMD.h"
 
-const char hello[] = "\r\nDell OCP Led Text Fixture (LTF)\r\n";
+// Versions
+// 1.1.x was Microchip Studio then MPLAB (2022)
+// 1.2.x is PlatformIO/VSCode (2023)
+const char        versString[] = "1.2.1";
+
+const char hello[] = "\r\nDell Vulcan/OCP LED Text Fixture (LTF) V\r\n";
 const char cliPrompt[] = "\r\nltf> ";
 const int promptLen = sizeof(cliPrompt);
 
@@ -15,11 +20,31 @@ const int promptLen = sizeof(cliPrompt);
 #define MAX_LINE_SZ         80
 #define OUTBFR_SIZE         (MAX_LINE_SZ*3)
 
-// Versions
-// 1.1.x was MPLAB (2022)
-// 1.2.x is PlatformIO/VSCode (2023)
-#define VERSION             "1.2.1"
+// disable EEPROM/FLASH debug, because it uses Serial not SerialUSB
+#define FLASH_DEBUG         0
 
+typedef struct {
+ uint16_t         pageSize;
+ uint32_t         pageCount;
+ uint16_t         rowSize;
+ uint16_t         EEPROMPages;
+
+} FLASH_DvcCtrl_t;
+
+typedef struct {
+    uint32_t        sig;
+    float           K;
+    bool            enCorrection;
+    int             offsetError;
+    int             gainError;
+} EEPROM_data_t;
+
+// FLASH/EEPROM Device Control Block
+static FLASH_DvcCtrl_t  FLASH_DCB;
+static const uint32_t   EEPROM_signature = 0xDE110C01;  // "DeLL Open Compute 01"
+static EEPROM_data_t    EEPROMData;
+
+// CLI Command Table structure
 typedef struct {
     char        cmd[CMD_NAME_MAX];
     int         (*func) (int x);
@@ -29,44 +54,78 @@ typedef struct {
 
 } cli_entry;
 
+// --------------------------------------------
+// Function prototypes
+// --------------------------------------------
+void EEPROM_Save(void);
+void ADC_EnableCorrection(void);
+
+// prototypes for CLI-called functions
+// template is func_name(int) because the int arg is the arg
+// count from parsing the command line; the arg tokens are
+// global in tokens[] with tokens[0] = command entered
 int help(int);
 int calib(int);
 int LEDRawRead(int);
 int rawRead(int);
-int vers(int);
+int setK(int);
 int readLoop(int);
 int readTemp(int);
 int debug(int);
 
-static char                *tokens[4];
+// CLI token stack
+static char                *tokens[8];
 
+// CLI command table
+// format is "command", function, required arg count, "help line 1", "help line 2" (2nd line can be NULL)
 cli_entry           cmdTable[] = {
-    {"debug",     debug, 0, "Debug functions for developer use only.", "Use caution if not a developer!"},
-    {"help",       help, 0, "Help for the help command.", NULL},
-    {"loop",   readLoop, 0, "Continuous loop reading raw data.", "Hit any key to exit loop."},
+    {"debug",     debug, -1, "Debug functions for developer use only.", NULL},
+    {"help",       help, 0, "THIS DOES NOT DISPLAY ON PURPOSE", NULL},
+    {"loop",   readLoop, 0, "Continuous loop reading raw sensor data.", "Hit any key to exit loop."},
     {"read", LEDRawRead, 0, "Read LED color temperature and intensity.", NULL},
-    {"temp",   readTemp, 0, "Reads board temperature sensor.", "Reports temperature in degrees C and F."},
-    {"vers",       vers, 0, "Displays software version.", NULL},
+    {"temp",   readTemp, 0, "Read board (not MCU core) temperature sensor.", "Reports temperature in degrees C and F."},
+    {"set",        setK, 2, "Sets a stored parameter.", "Requires 2 args: parameter and value\r\n\tParameters: k,gain,offset"},
 };
 
 #define CLI_ENTRIES     (sizeof(cmdTable) / sizeof(cli_entry))
 
+// --------------------------------------------
+// terminalOut() - wrapper to SerialUSB.print
+// that differentiates whether or not a CR is
+// in the given buffer to print
+// --------------------------------------------
 void terminalOut(char *buffer)
 {
   if ( strchr(buffer, 0x0d) )
-    SerialUSB.print(buffer);
+      SerialUSB.print(buffer);
   else
-    SerialUSB.println(buffer);
+      SerialUSB.println(buffer);
+
+  SerialUSB.flush();
 }
 
+// --------------------------------------------
+// doPrompt() - Write prompt to terminal
+// --------------------------------------------
 void doPrompt(void)
 {
-  for ( int i = 0; i < promptLen; i++ )
-  {
-    SerialUSB.write(cliPrompt[i]);
-  }
+    for ( int i = 0; i < promptLen; i++ )
+    {
+        SerialUSB.write(cliPrompt[i]);
+    }
+
+    SerialUSB.flush();
 }
 
+// possible CLI errors
+#define CLI_ERR_NO_ERROR          0
+#define CLI_ERR_CMD_NOT_FOUND     1
+#define CLI_ERR_TOO_FEW_ARGS      2
+#define CLI_ERR_TOO_MANY_ARGS     3
+
+// --------------------------------------------
+// cli() - Command Line Interpreter
+// --------------------------------------------
 bool cli(char *raw)
 {
     bool         rc = false;
@@ -76,12 +135,20 @@ bool cli(char *raw)
     int         tokNdx = 0;
     char        input[80];
     char        *s = input;
-    
+    int         error = CLI_ERR_CMD_NOT_FOUND;
+    int         argCount;
+
     strcpy(input, (char *) raw);
     len = strlen(input);
 
     // initial call, should get and save the command as 0th token
     token = strtok(input, delim);
+    if ( token == NULL )
+    {
+      doPrompt();
+      return(true);
+    }
+
     tokens[tokNdx++] = token;
 
     // subsequent calls should parse any space-separated args into tokens[]
@@ -92,20 +159,45 @@ bool cli(char *raw)
         tokens[tokNdx++] = token;
     }
 
+    argCount = tokNdx - 1;
+
     for ( int i = 0; i < CLI_ENTRIES; i++ )
     {
         if ( strncmp(tokens[0], cmdTable[i].cmd, len) == 0 )
         {
-            // command funcs are passed arg count, tokens are global
-            (cmdTable[i].func) (tokNdx);
-            rc = true;
-            break;
+            if ( cmdTable[i].argCount == argCount || cmdTable[i].argCount == -1 )
+            {
+                // command funcs are passed arg count, tokens are global
+                (cmdTable[i].func) (argCount);
+                rc = true;
+                error = CLI_ERR_NO_ERROR;
+                break;
+            }
+            else if ( cmdTable[i].argCount > argCount )
+            {
+                error = CLI_ERR_TOO_FEW_ARGS;
+                rc = false;
+                break;
+            }
+            else
+            {
+                error = CLI_ERR_TOO_MANY_ARGS;
+                rc = false;
+                break;
+            }
         }
     }
 
     if ( rc == false )
     {
-        terminalOut("Invalid command");
+        if ( error == CLI_ERR_CMD_NOT_FOUND )
+         terminalOut("Invalid command");
+        else if ( error == CLI_ERR_TOO_FEW_ARGS )
+          terminalOut("Not enough arguments for this command, check help.");
+        else if ( error == CLI_ERR_TOO_MANY_ARGS )
+          terminalOut("Too many arguments for this command, check help.");
+        else
+          terminalOut("Unknown parser s/w error");
     }
 
     doPrompt();
@@ -113,6 +205,13 @@ bool cli(char *raw)
 
 } // cli()
 
+//===================================================================
+//                     DEBUG FUNCTIONS
+//===================================================================
+
+// --------------------------------------------
+// debug_scan() - I2C bus scanner
+// --------------------------------------------
 void debug_scan(void)
 {
   byte        count = 0;
@@ -147,6 +246,9 @@ void debug_scan(void)
   }
 }
 
+// --------------------------------------------
+// debug_reset() - force board reset
+// --------------------------------------------
 void debug_reset(void)
 {
   SerialUSB.println("Board reset will disconnect USB-serial connection.");
@@ -155,6 +257,36 @@ void debug_reset(void)
   NVIC_SystemReset();
 }
 
+// --------------------------------------------
+// debug_dump_eeprom() - Dump EEPROM contents
+// --------------------------------------------
+void debug_dump_eeprom(void)
+{
+    char          outBfr[20];
+
+    SerialUSB.println("EEPROM Contents:");
+    SerialUSB.print("Signature:    ");
+    SerialUSB.println(EEPROMData.sig, HEX);
+    sprintf(outBfr, "%8.4f", EEPROMData.K);
+    SerialUSB.print("K Constant:   ");
+    SerialUSB.println(outBfr);
+    SerialUSB.print("ADC Correct:   ");
+    if ( EEPROMData.enCorrection )
+    {
+      SerialUSB.println("Enabled");
+      SerialUSB.print("Gain ERR:   ");
+      SerialUSB.println(EEPROMData.gainError, DEC);
+      SerialUSB.print("Offset ERR: ");
+      SerialUSB.println(EEPROMData.offsetError, DEC);
+    }
+    else
+      SerialUSB.println("Disabled");
+
+}
+
+// --------------------------------------------
+// debug() - Main debug program
+// --------------------------------------------
 int debug(int arg)
 {
     char        outBfr[80];
@@ -163,7 +295,7 @@ int debug(int arg)
 // uncomment to debug a debug function ;-)
     if ( arg )
     {
-      sprintf(outBfr, "Arg: %d Token: %s", arg, tokens[1]);
+      sprintf(outBfr, "Arg: %d Tokens: %s", arg, tokens[1]);
       terminalOut(outBfr);
     }
 #endif
@@ -172,14 +304,25 @@ int debug(int arg)
       debug_scan();
     else if ( strcmp(tokens[1], "reset") == 0 )
       debug_reset();
-
+    else if ( strcmp(tokens[1], "dump") == 0 )
+        debug_dump_eeprom();
 }
 
+//===================================================================
+//                            ADC Stuff
+//===================================================================
+
+// --------------------------------------------
+// syncADC() - Wait for ADC sync complete
+// --------------------------------------------
 static void syncADC() 
 {
   while (ADC->STATUS.bit.SYNCBUSY) {};
 }
 
+// --------------------------------------------
+// ADC_Init() - Initialze the ADC
+// --------------------------------------------
 void ADC_Init(void)
 {
   uint32_t        bias, linearity;
@@ -214,8 +357,20 @@ void ADC_Init(void)
   ADC->SAMPCTRL.reg = ADC_SAMPCTRL_SAMPLEN(1);
 
   ADC->INPUTCTRL.reg = ADC_INPUTCTRL_GAIN_DIV2;
+  syncADC();
 
-#if 0
+  if ( EEPROMData.enCorrection )
+  {
+    ADC_EnableCorrection();
+  }
+
+  syncADC();
+  ADC->CTRLA.bit.ENABLE = 1;
+  syncADC();
+}
+
+void ADC_EnableCorrection(void)
+{
 // set offset and gain correction values 
 // see section 33.6.7-10 of the MCU datasheet
 // used calculator at https://blog.thea.codes/getting-the-most-out-of-the-samd21-adc/
@@ -226,20 +381,18 @@ void ADC_Init(void)
 // improvement in accuracy between 0.2V and 3.2V.
 // Input: 0.284V ADC: 220
 // Input: 3.3V   ADC: 4094
-  int16_t       offset_error = -69;
-  int16_t       gain_error = 1400;
+
 
   syncADC();
-  ADC->OFFSETCORR.reg = ADC_OFFSETCORR_OFFSETCORR(offset_error);
-  ADC->GAINCORR.reg = ADC_GAINCORR_GAINCORR(gain_error);
+  ADC->OFFSETCORR.reg = ADC_OFFSETCORR_OFFSETCORR(EEPROMData.offsetError);
+  ADC->GAINCORR.reg = ADC_GAINCORR_GAINCORR(EEPROMData.gainError);
   ADC->CTRLB.bit.CORREN = 1;
-#endif
-
-  syncADC();
-  ADC->CTRLA.bit.ENABLE = 1;
 
 }
 
+// --------------------------------------------
+// ADC_Read() - read ADC channel as 16-bits
+// --------------------------------------------
 uint16_t ADC_Read(uint8_t ch)
 {
   uint16_t      result;
@@ -268,17 +421,23 @@ const float     maxVolts = 3.3f;
 volatile float           vC, vI, lv;
 volatile uint16_t        colorRaw, intensRaw;
 
+//===================================================================
+//                               READ Command
+//===================================================================
 int LEDRawRead(int arg)
 {
-    colorRaw = ADC_Read(2);
-    intensRaw = ADC_Read(3);
+    colorRaw = ADC_Read(SPECTRA_INTENSITY_OUT_PIN);
+    intensRaw = ADC_Read(SPECTRA_COLOR_OUT_PIN);
 
     // set breakpoint on NOP to obtain raw decimal values for
     // offset and gain correction calculator
     __NOP();
 
     vC = maxVolts * ((float) colorRaw / maxAdcBits);
+
+    // FIXME - lv formula is incorrect
     lv = (vC + 4) * 100.0;
+
     SerialUSB.print("     Color: ");
     SerialUSB.print(lv, 4);
     SerialUSB.print(" nm [raw: 0x");
@@ -300,7 +459,9 @@ int LEDRawRead(int arg)
 
 } // LEDRawRead()
 
-
+//===================================================================
+//                              TEMP Command
+//===================================================================
 int readTemp(int arg)
 {
   signed char         i2cData;
@@ -317,7 +478,7 @@ int readTemp(int arg)
   // read MSB only - sufficient for this project
   i2cData = Wire.read();
 
-  // data is two's complement so nothing need be done
+  // data is two's complement so nothing needs be done
   curTemp = (short) i2cData;
   degF = ((curTemp * 9.0) / 5.0) + 32.0;
 
@@ -330,6 +491,9 @@ int readTemp(int arg)
   return(0);
 }
 
+//===================================================================
+//                             LOOP Command
+//===================================================================
 int readLoop(int arg)
 {
   SerialUSB.println("Entering continuous loop, press any key to stop");
@@ -341,31 +505,35 @@ int readLoop(int arg)
     delay(1000);
   }
 
+  // flush any other chars user hit when exiting the loop
   while ( SerialUSB.available() )
     (void) SerialUSB.read();
 
   return(0);
 }
 
+//===================================================================
+//                               HELP Command
+//===================================================================
 int help(int arg)
 {
-    char        outBfr[80];
+    char        outBfr[160];
     
-    SerialUSB.println("Enter a command then press ENTER. Some commands allow arguments");
-    SerialUSB.println("which must be separated from the command and other arguments by");
-    SerialUSB.println("a space.  Up arrow repeats the last command; backspace or delete");
-    SerialUSB.println("erases the last character entered.");
-    SerialUSB.println("Commands Available:");
+    SerialUSB.print("Firmware version: ");
+    SerialUSB.println(versString);
+    SerialUSB.println("Enter a command then press ENTER. Some commands allow arguments which must");
+    SerialUSB.println("be separated from the command and other arguments by a space.");
+    SerialUSB.println("Up arrow repeats the last command; backspace or delete erases the last");
+    SerialUSB.println("character entered. Commands available are:");
 
     for ( int i = 0; i < CLI_ENTRIES; i++ )
     {
       if ( strcmp(cmdTable[i].cmd, "help") == 0 )
         continue;
 
-      sprintf(outBfr, "%s\r\n", cmdTable[i].cmd);
+      sprintf(outBfr, "%s\t%s\r\n", cmdTable[i].cmd, cmdTable[i].help1);
       terminalOut(outBfr);
-      sprintf(outBfr, "\t%s\r\n", cmdTable[i].help1);
-      terminalOut(outBfr);
+
       if ( cmdTable[i].help2 != NULL )
       {
         sprintf(outBfr, "\t%s\r\n", cmdTable[i].help2);
@@ -376,19 +544,182 @@ int help(int arg)
     return(0);
 }
 
-int vers(int arg)
+//===================================================================
+//                              SET Command
+//
+// set <parameter> <value>
+// 
+// Supported parameters: k, gain, offset
+//===================================================================
+int setK(int arg)
 {
-    char        outBfr[80];
-    
-    sprintf(outBfr, "Version %s has %d commands implemented\r\n", VERSION, (int) CLI_ENTRIES);
-    terminalOut(outBfr);
+    char          *parameter = tokens[1];
+    String        userEntry = tokens[2];
+    float         fValue;
+    int           iValue;
+    bool          isDirty = false;
+
+    if ( strcmp(parameter, "k") == 0 )
+    {
+        fValue = userEntry.toFloat();
+        if ( EEPROMData.K != fValue )
+        {
+          EEPROMData.K = fValue;
+          isDirty = true;
+        }
+    }
+    else if ( strcmp(parameter, "gain") == 0 )
+    {
+        // set ADC gain error
+        iValue = userEntry.toInt();
+        if (EEPROMData.gainError != iValue )
+        {
+          isDirty = true;
+          EEPROMData.gainError = iValue;
+        }
+    }
+    else if ( strcmp(parameter, "offset") == 0 )
+    {
+        // set ADC offset error
+        iValue = userEntry.toInt();
+        if (EEPROMData.offsetError != iValue )
+        {
+          isDirty = true;
+          EEPROMData.offsetError = iValue;
+        }
+    }
+    else if ( strcmp(parameter, "corr") == 0 )
+    {
+        // set ADC corr on|off
+        if ( strcmp(tokens[2], "off") == 0 )
+        {
+          if ( EEPROMData.enCorrection == true )
+          {
+              EEPROMData.enCorrection = false;
+              SerialUSB.println("ADC correction off");
+              isDirty = true;
+          }
+        }
+        else if ( strcmp(tokens[2], "on") == 0 )
+        {
+            if ( EEPROMData.enCorrection == false )
+            {
+                EEPROMData.enCorrection = true;
+                isDirty = true;
+            }
+        }
+        else
+        {
+          SerialUSB.println("Invalid ADC corr argument: must be 'on' or 'off'");
+        }
+    }
+    else
+    {
+        terminalOut("Invalid parameter name");
+        return(1);
+    }
+
+    if ( isDirty )
+        EEPROM_Save();
+
     return(0);
 }
 
 
+//===================================================================
+//                      EEPROM/NVM Stuff
+//===================================================================
 
+// --------------------------------------------
+// EEPROM_Save() - write EEPROM structure to
+// the EEPROM
+// --------------------------------------------
+void EEPROM_Save(void)
+{
+    uint8_t         *p = (uint8_t *) &EEPROMData;
+    uint16_t        eepromAddr = 0;
 
+    for ( int i = 0; i < sizeof(EEPROM_data_t); i++ )
+    {
+        EEPROM.write(eepromAddr++, *p++);
+    }
+    
+    EEPROM.commit();
+}
 
+// --------------------------------------------
+// EEPROM_Read() - Read struct from EEPROM
+// --------------------------------------------
+void EEPROM_Read(void)
+{
+    uint8_t         *p = (uint8_t *) &EEPROMData;
+    uint16_t        eepromAddr = 0;
+
+    for ( int i = 0; i < sizeof(EEPROM_data_t); i++ )
+    {
+        *p++ = EEPROM.read(eepromAddr++);
+    }
+}
+
+// --------------------------------------------
+// EEPROM_Defaults() - Set defaults in struct
+// --------------------------------------------
+void EEPROM_Defaults(void)
+{
+    EEPROMData.sig = EEPROM_signature;
+    EEPROMData.K = 1.0;
+    EEPROMData.enCorrection = false;
+    EEPROMData.gainError = 1400;
+    EEPROMData.offsetError = -69;
+}
+
+// --------------------------------------------
+// EEPROM_InitLocal() - Initialize EEPROM & Data
+// --------------------------------------------
+bool EEPROM_InitLocal(void)
+{
+    uint16_t        pageSizeField;
+    uint32_t        pageCount;
+    bool            rc = true, tempBool;
+    uint32_t        temp;
+    uint8_t         *p = (uint8_t *) &EEPROMData;
+    uint16_t        eepromAddr = 0;
+
+    pageSizeField = NVMCTRL->PARAM.bit.PSZ;
+    FLASH_DCB.pageSize = pageSizes[pageSizeField];
+    FLASH_DCB.pageCount = NVMCTRL->PARAM.bit.NVMP;
+    FLASH_DCB.rowSize = FLASH_DCB.pageSize * 4;
+
+    tempBool = EEPROM.isValid();
+
+    EEPROM_Read();
+
+    if ( EEPROMData.sig != EEPROM_signature )
+    {
+      // EEPROM failed: either never been used, or real failure
+      // initialize the signature and settings
+
+      // FIXME: When debugging, EEPROM fails every time, but it
+      // is OK over resets and power cycles.  
+      EEPROM_Defaults();
+
+      // save EEPROM data on the device
+      EEPROM_Save();
+
+      rc = 1;
+      SerialUSB.println("EEPROM validation FAILED, EEPROM initialized OK");
+    }
+    else
+    {
+      SerialUSB.println("EEPROM validated OK");
+    }
+
+    return(rc);
+}
+
+//===================================================================
+//                      setup() - Initialization
+//===================================================================
 void setup() 
 {
   bool      LEDstate = false;
@@ -405,25 +736,36 @@ void setup()
   PORT->Group[1].PMUX[3].reg = PORT_PMUX_PMUXO_B;
   PORT->Group[1].PMUX[4].reg = PORT_PMUX_PMUXO_B;
 
-  // configure heartbeat LED pin and turn on
+  // configure heartbeat LED pin and turn on which indicates that the
+  // board is being initialized
   pinMode(PIN_LED, OUTPUT);
   digitalWrite(PIN_LED, LEDstate);
 
-  ADC_Init();
-  Wire.begin();
+
 
   SerialUSB.begin(115200);
   while ( !SerialUSB )
   {
-    LEDstate = LEDstate ? 0 : 1;
-    digitalWrite(PIN_LED, LEDstate);
-    delay(200);
+      // fast blink while waiting for a connection
+      LEDstate = LEDstate ? 0 : 1;
+      digitalWrite(PIN_LED, LEDstate);
+      delay(200);
   }
 
-  SerialUSB.println(hello);
-  doPrompt();
-}
+  // initialize EEPROM
+  EEPROM_InitLocal();
+  ADC_Init();
+  Wire.begin();
 
+  SerialUSB.print(hello);
+  SerialUSB.println(versString);
+  doPrompt();
+
+} // setup()
+
+//===================================================================
+//                     loop() - Main Program Loop
+//===================================================================
 // FLASHING NOTE: loop() doesn't get called until USB-serial connection
 // has been established (ie, SerialUSB = 1).
 void loop() 
@@ -445,53 +787,56 @@ void loop()
       digitalWrite(PIN_LED, LEDstate);
   }
 
+  // process incoming serial over USB characters
   if ( SerialUSB.available() )
   {
-    byteIn = SerialUSB.read();
-    if ( byteIn == 0x0a )
-      SerialUSB.println(byteIn);
-    else if ( byteIn == 0x0d )
-    {
-      SerialUSB.println(" ");
-      inBfr[inCharCount] = 0;
-      inCharCount = 0;
-      strcpy(lastCmd, inBfr);
-      cli(inBfr);
-    }
-    else if ( byteIn == 0x1b )
-    {
-      if ( SerialUSB.available() )
+      byteIn = SerialUSB.read();
+      if ( byteIn == 0x0a )
+          SerialUSB.println(byteIn);
+      else if ( byteIn == 0x0d )
       {
-        byteIn = SerialUSB.read();
-        if ( byteIn == '[' )
-        {
+          SerialUSB.println(" ");
+          inBfr[inCharCount] = 0;
+          inCharCount = 0;
+          strcpy(lastCmd, inBfr);
+          cli(inBfr);
+      }
+      else if ( byteIn == 0x1b )
+      {
+          // handle ANSI escape sequence - only UP arrow is supported
           if ( SerialUSB.available() )
           {
-            byteIn = SerialUSB.read();
-            if ( byteIn == 'A' )
-            {
-              doPrompt();
-              terminalOut(lastCmd);
-              cli(lastCmd);
+              byteIn = SerialUSB.read();
+              if ( byteIn == '[' )
+              {
+                if ( SerialUSB.available() )
+                {
+                    byteIn = SerialUSB.read();
+                    if ( byteIn == 'A' )
+                    {
+                        doPrompt();
+                        terminalOut(lastCmd);
+                        cli(lastCmd);
+                    }
+                }
             }
-          }
         }
-      }
     }
     else if ( byteIn == 127 || byteIn == 8 )
     {
-      // delete & backspace
-      inBfr[inCharCount] = 0;
-      inCharCount--;
-      SerialUSB.write(bs, 4);
-      SerialUSB.write(' ');
-      SerialUSB.write(bs, 4);
+        // delete & backspace do the same thing
+        inBfr[inCharCount] = 0;
+        inCharCount--;
+        SerialUSB.write(bs, 4);
+        SerialUSB.write(' ');
+        SerialUSB.write(bs, 4);
     }
     else
     {
-      // all other keys get stored in buffer
-      SerialUSB.write((char) byteIn);
-      inBfr[inCharCount++] = byteIn;
+        // all other keys get stored in buffer
+        SerialUSB.write((char) byteIn);
+        inBfr[inCharCount++] = byteIn;
     }
   }
-}
+
+} // loop()

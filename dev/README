@@ -1,0 +1,5 @@
+Development folder, contains deprecated or unused code or files.
+ZFLASH.c/.h were the initial FLASH driver.   However, discovered how to
+use the EEPROM emulation and since that fit the requirements, the ZFLASH
+driver was never debugged.
+
