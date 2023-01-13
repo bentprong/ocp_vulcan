@@ -11,16 +11,19 @@ const char      versString[] = "1.2.1";
 const char      hello[] = "Dell Vulcan/OCP LED Text Fixture (LTF) V";
 const char      cliPrompt[] = "\r\nltf> ";
 const int       promptLen = sizeof(cliPrompt);
-//const float     voltsPerCount = 0.00081;      // 3.3V / 4095
-const float     voltsPerCount = 0.00061;      // 2.5V
+const float     ADCGain = 2.0;
+const float     ADCVrefA = 2.5;
+float           voltsPerCount = ADCVrefA / 4095; // 0.00061;      // = 2.5V / 4095
 
-#define SPECTRA_COLOR_OUT_PIN       ADC_INPUTCTRL_MUXPOS_PIN3_Val
 #define SPECTRA_INTENSITY_OUT_PIN   ADC_INPUTCTRL_MUXPOS_PIN2_Val
+#define SPECTRA_COLOR_OUT_PIN       ADC_INPUTCTRL_MUXPOS_PIN3_Val
+#define ADC_VREF_PIN                ADC_INPUTCTRL_MUXPOS_PIN1_Val
 #define AT30TS74_I2C_ADDR           72 // 0x48
-
-#define CMD_NAME_MAX        12
-#define MAX_LINE_SZ         80
-#define OUTBFR_SIZE         (MAX_LINE_SZ*3)
+#define FAST_BLINK_DELAY            200
+#define SLOW_BLINK_DELAY            1000
+#define CMD_NAME_MAX                12
+#define MAX_LINE_SZ                 80
+#define OUTBFR_SIZE                 (MAX_LINE_SZ * 3)
 
 // disable EEPROM/FLASH debug, because it uses Serial not SerialUSB
 #define FLASH_DEBUG         0
@@ -213,38 +216,34 @@ bool cli(char *raw)
 void debug_scan(void)
 {
   byte        count = 0;
+  int         scanCount = 0;
+  uint32_t    startTime = millis();
 
   SerialUSB.println ("Scanning I2C bus...");
 
   for (byte i = 8; i < 120; i++)
   {
+    scanCount++;
     Wire.beginTransmission(i);
     if (Wire.endTransmission() == 0)
     {
       sprintf(outBfr, "Found device at address %d 0x%2X", i, i);
       SerialUSB.println(outBfr);
-      #if 0
-      SerialUSB.print ("Found device at address ");
-      SerialUSB.print (i, DEC);
-      SerialUSB.print (" (0x");
-      SerialUSB.print (i, HEX);
-      SerialUSB.println (")");
-      #endif
       count++;
-      delay (1);  
+      delay(10);  
     } 
   } 
 
-  SerialUSB.println ("Scan Complete.");
+  SerialUSB.print("Scan complete, addresses scanned:");
+  SerialUSB.print(scanCount);
+  SerialUSB.print(" in ");
+  SerialUSB.print(millis() - startTime);
+  SerialUSB.println(" ms");
+
   if ( count )
   {
     sprintf(outBfr, "Found %d I2C device(s)", count);
     SerialUSB.println(outBfr);
-    #if 0
-    SerialUSB.print ("Found ");
-    SerialUSB.print (count, DEC);
-    SerialUSB.println (" I2C device(s).");
-    #endif
   }
   else
   {
@@ -454,17 +453,46 @@ uint16_t ADC_Read(uint8_t ch)
 //===================================================================
 int LEDRawRead(int arg)
 {
-    volatile float           vC, vI, lv;
+    volatile float           vRef, vC, vI, lv;
     volatile uint16_t        colorRaw, intensRaw, intensity;
-    
-    colorRaw = ADC_Read(SPECTRA_INTENSITY_OUT_PIN) * 2.0;
-    intensRaw = ADC_Read(SPECTRA_COLOR_OUT_PIN) * 2.0;
+    uint16_t                 vrefRaw;
+
+    // ----------------------
+    // Read ADC Vref (2.5V)
+    // ----------------------
+    vrefRaw = ADC_Read(ADC_VREF_PIN) * ADCGain;
+    vRef = vrefRaw * voltsPerCount;
+    voltsPerCount = vRef / 4095;
+    sprintf(outBfr, "ADC Vref:           %4d %5.3f V", (int) vrefRaw, vRef);
+    SerialUSB.println(outBfr);
+
+    // ----------------------
+    // Read both ADC channels
+    // ----------------------
+    colorRaw = ADC_Read(SPECTRA_INTENSITY_OUT_PIN) * ADCGain;
+    intensRaw = ADC_Read(SPECTRA_COLOR_OUT_PIN) * ADCGain;
 
     // set breakpoint on NOP to obtain raw decimal values for
     // each input channel; plug into calculator online to get
     // offset and gain correction values used in ADC driver
     __NOP();
 
+    // ----------------------
+    // Calculate Intensity
+    // ----------------------
+    vI = intensRaw * voltsPerCount;
+
+    // TODO calculate intensity - from graph in datasheet
+    // Says the ADC counts correspond to LED's intensity in mcds
+    // since sensor voltage is divided by 2, multiply by 2
+    // 4V = 20K mcd
+    intensity = intensRaw * 2;
+    sprintf(outBfr, "Intensity: %4d mcd %4d %5.3f V", (int) intensity, intensRaw, vI);
+    SerialUSB.println(outBfr);
+
+    // ----------------------
+    // Calculate Color
+    // ----------------------
     vC = colorRaw * voltsPerCount;
 
     // FIXME - lv formula is incorrect; the equation below
@@ -473,16 +501,6 @@ int LEDRawRead(int arg)
     lv = (vC + 4) * 100.0;
 
     sprintf(outBfr, "    Color: %4d nm  %4d %5.3f V", (int) lv, colorRaw, vC);
-    SerialUSB.println(outBfr);
-
-    vI = intensRaw * voltsPerCount;
-
-    // TODO calculate intensity - from graph in datasheet
-    // Says the ADC counts correspond to LED's intensity in mcds
-    // since sensor voltage is divided by 2, multiple by 2
-    // 4V = 20K mcd
-    intensity = intensRaw * 2;
-    sprintf(outBfr, "Intensity: %4d mcd %4d %5.3f V-ADC", (int) intensity, intensRaw, vI);
     SerialUSB.println(outBfr);
 
     return(0);
@@ -761,13 +779,15 @@ void setup()
   PORT->Group[1].PMUX[3].reg = PORT_PMUX_PMUXO_B;
   PORT->Group[1].PMUX[4].reg = PORT_PMUX_PMUXO_B;
 
+  // TODO configure ADC AREFA pin
+
   // configure heartbeat LED pin and turn on which indicates that the
   // board is being initialized
   pinMode(PIN_LED, OUTPUT);
   digitalWrite(PIN_LED, LEDstate);
 
   // start serial over USB and wait for a connection
-  // blink LED while waiting
+  // NOTE: Baud rate isn't applicable to USB but...
   // NOTE: Many libraries won't init unless Serial
   // is running (or in this case SerialUSB)
   SerialUSB.begin(115200);
@@ -776,7 +796,7 @@ void setup()
       // fast blink while waiting for a connection
       LEDstate = LEDstate ? 0 : 1;
       digitalWrite(PIN_LED, LEDstate);
-      delay(200);
+      delay(FAST_BLINK_DELAY);
   }
 
   // initialize system & libraries
@@ -797,6 +817,10 @@ void setup()
 // FLASHING NOTE: loop() doesn't get called until USB-serial connection
 // has been established (ie, SerialUSB = 1).
 //
+// This loop does two things: blink the heartbeat LED and handle
+// incoming characters over SerialUSB connection.  Once a full CR
+// terminated input line has been received, it calls the CLI to
+// parse and execute any valid command, or sends an error message.
 //===================================================================
 void loop() 
 {
@@ -805,12 +829,11 @@ void loop()
   static int      inCharCount = 0;
   static char     lastCmd[80] = {0};
   const char      bs[4] = {0x1b, '[', '1', 'D'};  // terminal: backspace seq
-
   static bool     LEDstate = false;
   static uint32_t time = millis();
 
   // blink heartbeat LED
-  if ( millis() - time >= 1000  )
+  if ( millis() - time >= SLOW_BLINK_DELAY )
   {
       time = millis();
       LEDstate = LEDstate ? 0 : 1;
