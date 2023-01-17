@@ -1,5 +1,6 @@
 {
     "files.associations": {
-        "arduino.h": "c"
+        "arduino.h": "c",
+        "stdint-gcc.h": "c"
     }
 }
