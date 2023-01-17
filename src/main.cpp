@@ -252,7 +252,7 @@ void debug_scan(void)
 // --------------------------------------------
 void debug_reset(void)
 {
-    SerialUSB.println("Board reset will disconnect USB-serial connection.");
+    SerialUSB.println("Board reset will disconnect USB-serial connection now.");
     SerialUSB.println("Repeat whatever steps you took to connect to the board.");
     delay(1000);
     NVIC_SystemReset();
@@ -264,14 +264,15 @@ void debug_reset(void)
 void debug_dump_eeprom(void)
 {
     SerialUSB.println("EEPROM Contents:");
-    SerialUSB.print("Signature:    ");
+    SerialUSB.print("Signature:     ");
     SerialUSB.println(EEPROMData.sig, HEX);
     sprintf(outBfr, "%8.4f", EEPROMData.K);
     SerialUSB.print("K Constant:   ");
     SerialUSB.println(outBfr);
-    SerialUSB.print("ADC Correct:   ");
+
     if ( EEPROMData.enCorrection )
     {
+      SerialUSB.print("ADC Correct:   ");
       SerialUSB.println("Enabled");
       SerialUSB.print("Gain ERR:   ");
       SerialUSB.println(EEPROMData.gainError, DEC);
@@ -287,6 +288,8 @@ void debug_read(void)
     float       volts;
     uint16_t    raw;
 
+    // debug tool that reads ADC channels 0-5 although not all
+    // are used by this project
     for ( uint8_t i = 0; i < 6; i++ )
     {
         raw = ADC_Read(i);
