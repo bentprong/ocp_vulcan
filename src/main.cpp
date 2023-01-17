@@ -3,21 +3,15 @@
 #include "float.h"
 #include "FlashAsEEPROM_SAMD.h"
 
-// Versions
-// 1.1.x was Microchip Studio then MPLAB (2022): both tools unstable/unsuitable
-// 1.2.x is PlatformIO/VSCode (2023)
-const char      versString[] = "1.2.1";
-
-const char      hello[] = "Dell Vulcan/OCP LED Text Fixture (LTF) V";
-const char      cliPrompt[] = "\r\nltf> ";
-const int       promptLen = sizeof(cliPrompt);
-const float     ADCGain = 2.0;
-const float     ADCVrefA = 2.5;
-float           voltsPerCount = ADCVrefA / 4095; // 0.00061;      // = 2.5V / 4095
-
+// This project does not use the standard Arduino analog functions which
+// number analog inputs A0.. instead we use the def for the muxpos bit
+// field in the INPUTCTRL ADC register directly.  See variants.cpp and
+// variants.h in the PlatformIO install directory
+#define ADC_VREF_PIN                ADC_INPUTCTRL_MUXPOS_PIN1_Val
 #define SPECTRA_INTENSITY_OUT_PIN   ADC_INPUTCTRL_MUXPOS_PIN2_Val
 #define SPECTRA_COLOR_OUT_PIN       ADC_INPUTCTRL_MUXPOS_PIN3_Val
-#define ADC_VREF_PIN                ADC_INPUTCTRL_MUXPOS_PIN1_Val
+#define ADC_OVERSAMPLE_COUNT        32
+
 #define AT30TS74_I2C_ADDR           72 // 0x48
 #define FAST_BLINK_DELAY            200
 #define SLOW_BLINK_DELAY            1000
@@ -25,14 +19,33 @@ float           voltsPerCount = ADCVrefA / 4095; // 0.00061;      // = 2.5V / 40
 #define MAX_LINE_SZ                 80
 #define OUTBFR_SIZE                 (MAX_LINE_SZ * 3)
 
-// disable EEPROM/FLASH debug, because it uses Serial not SerialUSB
-#define FLASH_DEBUG         0
+// disable EEPROM/FLASH library driver debug, because it uses Serial 
+// not SerialUSB and may hang on startup as a result
+#define FLASH_DEBUG               0
 
 // possible CLI errors
 #define CLI_ERR_NO_ERROR          0
 #define CLI_ERR_CMD_NOT_FOUND     1
 #define CLI_ERR_TOO_FEW_ARGS      2
 #define CLI_ERR_TOO_MANY_ARGS     3
+
+// Versions
+// 1.1.x was Microchip Studio then MPLAB (2022): both tools unstable/unsuitable
+// 1.2.x is PlatformIO/VSCode (2023)
+const char      versString[] = "1.2.1";
+
+// Constant Data
+const char      hello[] = "Dell Vulcan/OCP LED Text Fixture (LTF) V";
+const char      cliPrompt[] = "\r\nltf> ";
+const int       promptLen = sizeof(cliPrompt);
+const float     ADCGain = 2.0;
+const float     ADCVrefA = 2.5;
+const uint32_t  EEPROM_signature = 0xDE110C01;  // "DeLL Open Compute 01"
+
+// Variable data
+float           voltsPerCount = ADCVrefA / 4095.0;
+uint16_t        ADC_resultsArray[ADC_OVERSAMPLE_COUNT];
+char            outBfr[OUTBFR_SIZE];
 
 // CLI Command Table structure
 typedef struct {
@@ -44,6 +57,7 @@ typedef struct {
 
 } cli_entry;
 
+// EEPROM data storage struct
 typedef struct {
     uint32_t        sig;
     float           K;
@@ -52,13 +66,11 @@ typedef struct {
     int             gainError;
 } EEPROM_data_t;
 
-// FLASH/EEPROM Device Control Block
-const uint32_t          EEPROM_signature = 0xDE110C01;  // "DeLL Open Compute 01"
-EEPROM_data_t           EEPROMData;
-char                    outBfr[OUTBFR_SIZE];
+// FLASH/EEPROM Data buffer
+EEPROM_data_t       EEPROMData;
 
 // --------------------------------------------
-// Function prototypes
+// Forward function prototypes
 // --------------------------------------------
 void EEPROM_Save(void);
 void ADC_EnableCorrection(void);
@@ -67,7 +79,8 @@ uint16_t ADC_Read(uint8_t ch);
 // prototypes for CLI-called functions
 // template is func_name(int) because the int arg is the arg
 // count from parsing the command line; the arg tokens are
-// global in tokens[] with tokens[0] = command entered
+// global in tokens[] with tokens[0] = command entered and
+// arg count does not include the command token
 int help(int);
 int calib(int);
 int LEDRawRead(int);
@@ -78,11 +91,11 @@ int readTemp(int);
 int debug(int);
 
 // CLI token stack
-static char                *tokens[8];
+char                *tokens[8];
 
 // CLI command table
 // format is "command", function, required arg count, "help line 1", "help line 2" (2nd line can be NULL)
-cli_entry           cmdTable[] = {
+const cli_entry     cmdTable[] = {
     {"debug",    debug, -1, "Debug functions mostly for developer use.", "'debug reset' resets board; 'debug dump' dumps EEPROM"},
     {"help",       help, 0, "THIS DOES NOT DISPLAY ON PURPOSE", " "},
     {"check",  readLoop, 0, "Continuous loop reading raw sensor data.", "Hit any key to exit loop."},
@@ -92,23 +105,6 @@ cli_entry           cmdTable[] = {
 };
 
 #define CLI_ENTRIES     (sizeof(cmdTable) / sizeof(cli_entry))
-
-#if 0
-// --------------------------------------------
-// terminalOut() - wrapper to SerialUSB.print
-// that differentiates whether or not a CR is
-// in the given buffer to print
-// --------------------------------------------
-void terminalOut(char *buffer)
-{
-  if ( strchr(buffer, 0x0d) )
-      SerialUSB.print(buffer);
-  else
-      SerialUSB.println(buffer);
-
-  SerialUSB.flush();
-}
-#endif
 
 // --------------------------------------------
 // doPrompt() - Write prompt to terminal
@@ -411,10 +407,6 @@ void ADC_EnableCorrection(void)
 
 }
 
-#define ADC_OVERSAMPLE_COUNT        32
-
-uint16_t        resultsArray[ADC_OVERSAMPLE_COUNT];
-
 // --------------------------------------------
 // ADC_Read() - read ADC channel as 16-bits
 // --------------------------------------------
@@ -436,7 +428,9 @@ uint16_t ADC_Read(uint8_t ch)
 
     // read result - also clears RESRDY bit
     result = ADC->RESULT.bit.RESULT;
-    resultsArray[i] = result;
+    ADC_resultsArray[i] = result;
+
+    delay(25);
 
     if ( i == 0 )
       continue;
@@ -588,9 +582,10 @@ int help(int arg)
         sprintf(outBfr, "\t%s", cmdTable[i].help2);
         SerialUSB.println(outBfr);
       }
+
+      SerialUSB.flush();
     }
 
-    SerialUSB.flush();
     return(0);
 }
 
