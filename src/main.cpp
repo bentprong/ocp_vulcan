@@ -8,9 +8,10 @@
 // field in the INPUTCTRL ADC register directly.  See variants.cpp and
 // variants.h in the PlatformIO install directory
 #define ADC_VREF_PIN                ADC_INPUTCTRL_MUXPOS_PIN1_Val
-#define SPECTRA_INTENSITY_OUT_PIN   ADC_INPUTCTRL_MUXPOS_PIN2_Val
-#define SPECTRA_COLOR_OUT_PIN       ADC_INPUTCTRL_MUXPOS_PIN3_Val
+#define SPECTRA_COLOR_OUT_PIN       ADC_INPUTCTRL_MUXPOS_PIN2_Val
+#define SPECTRA_INTENSITY_OUT_PIN   ADC_INPUTCTRL_MUXPOS_PIN3_Val
 #define ADC_OVERSAMPLE_COUNT        32
+#define ADC_SAMPLING_DELAY          33
 
 #define AT30TS74_I2C_ADDR           72 // 0x48
 #define FAST_BLINK_DELAY            200
@@ -28,11 +29,12 @@
 #define CLI_ERR_CMD_NOT_FOUND     1
 #define CLI_ERR_TOO_FEW_ARGS      2
 #define CLI_ERR_TOO_MANY_ARGS     3
+#define MAX_TOKENS                8
 
 // Versions
 // 1.1.x was Microchip Studio then MPLAB (2022): both tools unstable/unsuitable
 // 1.2.x is PlatformIO/VSCode (2023)
-const char      versString[] = "1.2.1";
+const char      versString[] = "1.2.2";
 
 // Constant Data
 const char      hello[] = "Dell Vulcan/OCP LED Text Fixture (LTF) V";
@@ -59,15 +61,30 @@ typedef struct {
 
 // EEPROM data storage struct
 typedef struct {
-    uint32_t        sig;
-    float           K;
+    uint32_t        sig;      // unique EEPROMP signature (see #define)
+    float           K;        // K constant for LED equations
+
+    // these were used in ADC driver development, not for production
     bool            enCorrection;
     int             offsetError;
     int             gainError;
+
 } EEPROM_data_t;
 
 // FLASH/EEPROM Data buffer
 EEPROM_data_t       EEPROMData;
+
+// LED measurement
+typedef struct {
+    float       lv;
+    float       vC;
+    uint16_t    colorRaw;
+
+    uint16_t    intensity;
+    float       vI;
+    uint16_t    intensityRaw;
+
+} led_meas_t;
 
 // --------------------------------------------
 // Forward function prototypes
@@ -75,6 +92,7 @@ EEPROM_data_t       EEPROMData;
 void EEPROM_Save(void);
 void ADC_EnableCorrection(void);
 uint16_t ADC_Read(uint8_t ch);
+int waitAnyKey(void);
 
 // prototypes for CLI-called functions
 // template is func_name(int) because the int arg is the arg
@@ -83,15 +101,18 @@ uint16_t ADC_Read(uint8_t ch);
 // arg count does not include the command token
 int help(int);
 int calib(int);
-int LEDRawRead(int);
+int readCmd(int);
 int rawRead(int);
 int setK(int);
 int readLoop(int);
 int readTemp(int);
 int debug(int);
+int calib(int);
 
 // CLI token stack
-char                *tokens[8];
+char                *tokens[MAX_TOKENS];
+
+led_meas_t      currentMeasurement;
 
 // CLI command table
 // format is "command", function, required arg count, "help line 1", "help line 2" (2nd line can be NULL)
@@ -99,9 +120,10 @@ const cli_entry     cmdTable[] = {
     {"debug",    debug, -1, "Debug functions mostly for developer use.", "'debug reset' resets board; 'debug dump' dumps EEPROM"},
     {"help",       help, 0, "THIS DOES NOT DISPLAY ON PURPOSE", " "},
     {"check",  readLoop, 0, "Continuous loop reading raw sensor data.", "Hit any key to exit loop."},
-    {"read", LEDRawRead, 0, "Read LED color temperature and intensity.", " "},
+    {"read",    readCmd, 0, "Read LED color temperature and intensity.", " "},
     {"temp",   readTemp, 0, "Read board (not MCU core) temperature sensor.", "Reports temperature in degrees C and F."},
-    {"set",        setK, 2, "Sets a stored parameter.", "set k 1.234 sets K constant."}
+    {"set",        setK, 2, "Sets a stored parameter.", "set k 1.234 sets K constant."},
+    {"calib",     calib, 0, "Calibrate board LED sensor", "Uses LTF Calibration Board LEDs"},
 };
 
 #define CLI_ENTRIES     (sizeof(cmdTable) / sizeof(cli_entry))
@@ -146,9 +168,16 @@ bool cli(char *raw)
     // subsequent calls should parse any space-separated args into tokens[]
     // note that what's stored in tokens[] are string pointers into the
     // input array not the actual string token itself
-    while ( (token = (char *) strtok(NULL, delim))  != NULL )
+    while ( (token = (char *) strtok(NULL, delim)) != NULL && tokNdx < MAX_TOKENS )
     {
         tokens[tokNdx++] = token;
+    }
+
+    if ( tokNdx >= MAX_TOKENS )
+    {
+        SerialUSB.println("Too many arguments in command line!");
+        doPrompt();
+        return(false);
     }
 
     argCount = tokNdx - 1;
@@ -197,6 +226,28 @@ bool cli(char *raw)
     return(rc);
 
 } // cli()
+
+//===================================================================
+//                         CALIBRATION
+//===================================================================
+
+// --------------------------------------------
+// calib() - automatic LED calibration
+// --------------------------------------------
+int calib(int arg)
+{
+    int       keyPressed;
+
+    SerialUSB.println("Power the LTF Calibration Board and select the GREEN LED now.");
+    SerialUSB.println("Press 'y' to begin calibration, or 'n' to exit.");
+    keyPressed = toupper(waitAnyKey());
+    if ( keyPressed != 'Y' )
+        return(0);
+
+    SerialUSB.println("Starting measurements, please wait...");
+
+    return(0);
+}
 
 //===================================================================
 //                     DEBUG FUNCTIONS
@@ -364,7 +415,7 @@ void ADC_Init(void)
   ADC->CALIB.reg = ADC_CALIB_BIAS_CAL(bias) | ADC_CALIB_LINEARITY_CAL(linearity);
   syncADC();
 
-  // set analog reference - AREFA = pin 6 VDDANA of MCU
+  // set analog reference - AREFA = pin 4 = 2.5V ref supply
   ADC->REFCTRL.reg = ADC_REFCTRL_REFSEL_AREFA;
 
   ADC->AVGCTRL.reg = ADC_AVGCTRL_SAMPLENUM_1;
@@ -389,6 +440,9 @@ void ADC_Init(void)
   syncADC();
 }
 
+// --------------------------------------------
+// ADC_EnableCorrection - not in use
+// --------------------------------------------
 void ADC_EnableCorrection(void)
 {
 // set offset and gain correction values 
@@ -422,7 +476,7 @@ uint16_t ADC_Read(uint8_t ch)
   ADC->INPUTCTRL.bit.MUXPOS = ch;
   ADC->INPUTCTRL.bit.MUXNEG = ADC_INPUTCTRL_MUXNEG_GND_Val;
 
-  for ( int i = 0; i < ADC_OVERSAMPLE_COUNT+1; i++ )
+  for ( int i = 0; i <= ADC_OVERSAMPLE_COUNT; i++ )
   {
     syncADC();
     ADC->SWTRIG.bit.START = 1;
@@ -431,13 +485,13 @@ uint16_t ADC_Read(uint8_t ch)
 
     // read result - also clears RESRDY bit
     result = ADC->RESULT.bit.RESULT;
-    ADC_resultsArray[i] = result;
+    delay(ADC_SAMPLING_DELAY);
 
-    delay(25);
-
+    // skip first measurement per datasheet
     if ( i == 0 )
       continue;
 
+    ADC_resultsArray[i - 1] = result;
     sum += result;
   }
 
@@ -445,64 +499,58 @@ uint16_t ADC_Read(uint8_t ch)
   return(result);
 }
 
-//===================================================================
-//                               READ Command
-//===================================================================
-int LEDRawRead(int arg)
+void ledRawRead(led_meas_t *m)
 {
-    volatile float           vRef, vC, vI, lv;
-    volatile uint16_t        colorRaw, intensRaw, intensity;
-    uint16_t                 vrefRaw;
-
-    // ----------------------
-    // Read ADC Vref (2.5V)
-    // ----------------------
-    vrefRaw = ADC_Read(ADC_VREF_PIN) * ADCGain;
-    vRef = vrefRaw * voltsPerCount;
-    voltsPerCount = vRef / 4095;
-    sprintf(outBfr, "ADC Vref:           %4d %5.3f V", (int) vrefRaw, vRef);
-    SerialUSB.println(outBfr);
-
     // ----------------------
     // Read both ADC channels
     // ----------------------
-    colorRaw = ADC_Read(SPECTRA_INTENSITY_OUT_PIN) * ADCGain;
-    intensRaw = ADC_Read(SPECTRA_COLOR_OUT_PIN) * ADCGain;
-
-    // set breakpoint on NOP to obtain raw decimal values for
-    // each input channel; plug into calculator online to get
-    // offset and gain correction values used in ADC driver
-    __NOP();
+    m->intensityRaw = ADC_Read(SPECTRA_INTENSITY_OUT_PIN);
+    m->colorRaw = ADC_Read(SPECTRA_COLOR_OUT_PIN);
 
     // ----------------------
     // Calculate Intensity
+    // Datasheet says the V corresponds to mcd!
     // ----------------------
-    vI = intensRaw * voltsPerCount;
-
-    // TODO calculate intensity - from graph in datasheet
-    // Says the ADC counts correspond to LED's intensity in mcds
-    // since sensor voltage is divided by 2, multiply by 2
-    // 4V = 20K mcd
-    intensity = intensRaw * 2;
-    sprintf(outBfr, "Intensity: %4d mcd %4d %5.3f V", (int) intensity, intensRaw, vI);
-    SerialUSB.println(outBfr);
+    m->vI = (m->intensityRaw * voltsPerCount) * ADCGain;
+    m->intensity = (uint16_t) m->vI;
 
     // ----------------------
     // Calculate Color
     // ----------------------
-    vC = colorRaw * voltsPerCount;
+    m->vC = (m->colorRaw * voltsPerCount) * ADCGain;
 
-    // FIXME - lv formula is incorrect; the equation below
-    // is from the Spectra DS datasheet, Color Response
-    // section
-    lv = (vC + 4) * 100.0;
+    // formula from datasheet with K factor added in
+    m->lv = ((m->vC + 4.0) * 100.0) * EEPROMData.K;
+}
+  /* removed, because 2.5V supply fluctuates constantly causing measurements to vary
+    // ----------------------
+    // Read ADC Vref (2.5V)
+    // ----------------------
+    m->aRefRaw = ADC_Read(ADC_VREF_PIN) * ADCGain;
+    m->aRef = m->aRefRaw  * voltsPerCount;
+    voltsPerCount = m->aRef  / 4095;
+    sprintf(outBfr, "ADC Vref:           %4d %5.3f V", (int) m->aRefRaw, m->aRef);
+    SerialUSB.println(outBfr);
+    */
 
-    sprintf(outBfr, "    Color: %4d nm  %4d %5.3f V", (int) lv, colorRaw, vC);
+//===================================================================
+//                               READ Command
+//===================================================================
+int readCmd(int arg)
+{
+    led_meas_t          *m = &currentMeasurement;
+
+    ledRawRead(m);
+
+    sprintf(outBfr, "Intensity: %4d mcd %4d %5.3f V", (int) m->intensity, m->intensityRaw, m->vI);
+    SerialUSB.println(outBfr);
+
+    sprintf(outBfr, "    Color: %4d nm  %4d %5.3f V", (int) m->lv, m->colorRaw, m->vC);
     SerialUSB.println(outBfr);
 
     return(0);
 
-} // LEDRawRead()
+} // readCmd()
 
 //===================================================================
 //                              TEMP Command
@@ -537,7 +585,7 @@ int readTemp(int arg)
 }
 
 //===================================================================
-//                             LOOP Command
+//                             CHECK Command
 //===================================================================
 int readLoop(int arg)
 {
@@ -545,8 +593,9 @@ int readLoop(int arg)
 
   while ( SerialUSB.available() == 0 )
   {
-    LEDRawRead(0);
+    readCmd(0);
     readTemp(0);
+    SerialUSB.println(" ");
     delay(1000);
     SerialUSB.flush();
   }
@@ -556,6 +605,21 @@ int readLoop(int arg)
     (void) SerialUSB.read();
 
   return(0);
+}
+// --------------------------------------------
+// waitAnyKey() - wait for any key pressed
+//
+// WARNING: This is a blocking call!
+// --------------------------------------------
+int waitAnyKey(void)
+{
+    int             charIn;
+
+    while ( SerialUSB.available() == 0 )
+      ;
+
+    charIn = SerialUSB.read();
+    return(charIn);
 }
 
 //===================================================================
