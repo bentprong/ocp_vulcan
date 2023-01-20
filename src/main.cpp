@@ -10,7 +10,7 @@
 #define ADC_VREF_PIN                ADC_INPUTCTRL_MUXPOS_PIN1_Val
 #define SPECTRA_COLOR_OUT_PIN       ADC_INPUTCTRL_MUXPOS_PIN2_Val
 #define SPECTRA_INTENSITY_OUT_PIN   ADC_INPUTCTRL_MUXPOS_PIN3_Val
-#define ADC_OVERSAMPLE_COUNT        32
+#define ADC_OVERSAMPLE_COUNT        64
 #define ADC_SAMPLING_DELAY          33
 
 #define AT30TS74_I2C_ADDR           72 // 0x48
@@ -36,19 +36,6 @@
 // 1.2.x is PlatformIO/VSCode (2023)
 const char      versString[] = "1.2.2";
 
-// Constant Data
-const char      hello[] = "Dell Vulcan/OCP LED Text Fixture (LTF) V";
-const char      cliPrompt[] = "\r\nltf> ";
-const int       promptLen = sizeof(cliPrompt);
-const float     ADCGain = 2.0;
-const float     ADCVrefA = 2.5;
-const uint32_t  EEPROM_signature = 0xDE110C01;  // "DeLL Open Compute 01"
-
-// Variable data
-float           voltsPerCount = ADCVrefA / 4095.0;
-uint16_t        ADC_resultsArray[ADC_OVERSAMPLE_COUNT];
-char            outBfr[OUTBFR_SIZE];
-
 // CLI Command Table structure
 typedef struct {
     char        cmd[CMD_NAME_MAX];
@@ -71,20 +58,33 @@ typedef struct {
 
 } EEPROM_data_t;
 
-// FLASH/EEPROM Data buffer
-EEPROM_data_t       EEPROMData;
-
 // LED measurement
 typedef struct {
     float       lv;
     float       vC;
-    uint16_t    colorRaw;
+    uint16_t    colorCounts;
 
     uint16_t    intensity;
     float       vI;
-    uint16_t    intensityRaw;
+    uint16_t    intensityCounts;
 
 } led_meas_t;
+
+// Constant Data
+const char      hello[] = "Dell Vulcan/OCP LED Text Fixture (LTF) V";
+const char      cliPrompt[] = "ltf> ";
+const int       promptLen = sizeof(cliPrompt);
+const float     ADCGain = 2.0;
+const float     ADCVrefA = 2.5;
+const float     voltsPerCount = ADCVrefA / 4095.0;
+const uint32_t  EEPROM_signature = 0xDE110C01;  // "DeLL Open Compute 01"
+
+// Variable data
+uint16_t        ADC_resultsArray[ADC_OVERSAMPLE_COUNT+1];
+char            outBfr[OUTBFR_SIZE];
+
+// FLASH/EEPROM Data buffer
+EEPROM_data_t       EEPROMData;
 
 // --------------------------------------------
 // Forward function prototypes
@@ -336,17 +336,25 @@ void debug_dump_eeprom(void)
 
 void debug_read(void)
 {
-    float       volts;
-    uint16_t    raw;
+    uint16_t            rawCounts;
+    float               volts;
 
     // debug tool that reads ADC channels 0-5 although not all
     // are used by this project
     for ( uint8_t i = 0; i < 6; i++ )
     {
-        raw = ADC_Read(i);
-        volts = (raw * voltsPerCount) * 2.0;
-        sprintf(outBfr, "Ch %d %4d %8.3f V", i, raw, volts);
-        SerialUSB.println(outBfr);
+        rawCounts = ADC_Read(i);
+        volts = rawCounts * voltsPerCount * ADCGain;
+        sprintf(outBfr, "Ch %d %4d %8.3f V ", i, rawCounts, volts);
+        SerialUSB.print(outBfr);
+        if ( i == 1 )
+          SerialUSB.println("ARef");
+        else if ( i == 2 )
+          SerialUSB.println("Color");
+        else if ( i ==3 )
+          SerialUSB.println("Intensity");
+        else
+          SerialUSB.println("not used");
     }
 }
 
@@ -416,18 +424,24 @@ void ADC_Init(void)
   syncADC();
 
   // set analog reference - AREFA = pin 4 = 2.5V ref supply
-  ADC->REFCTRL.reg = ADC_REFCTRL_REFSEL_AREFA;
+  ADC->REFCTRL.bit.REFSEL = ADC_REFCTRL_REFSEL_AREFA_Val;
+
+  // enable reference buffer offset compensation
+  ADC->REFCTRL.bit.REFCOMP = 1;
 
   ADC->AVGCTRL.reg = ADC_AVGCTRL_SAMPLENUM_1;
 
   // set clock prescalar & resolution
   // this sets ADC to run at 31.25 kHz
-  ADC->CTRLB.reg = ADC_CTRLB_PRESCALER_DIV4 | ADC_CTRLB_RESSEL_12BIT;
+//  ADC->CTRLB.reg = ADC_CTRLB_PRESCALER_DIV4 | ADC_CTRLB_RESSEL_12BIT;
+  ADC->CTRLB.bit.PRESCALER = ADC_CTRLB_PRESCALER_DIV4_Val;
+  ADC->CTRLB.bit.RESSEL = ADC_CTRLB_RESSEL_12BIT_Val;
+  ADC->CTRLB.bit.FREERUN = 1;
 
   // adjust sample time for possible input impediance (allow ADC to charge cap)
   ADC->SAMPCTRL.reg = ADC_SAMPCTRL_SAMPLEN(1);
 
-//  ADC->INPUTCTRL.reg = ADC_INPUTCTRL_GAIN_DIV2;
+  ADC->INPUTCTRL.reg = ADC_INPUTCTRL_GAIN_DIV2;
   syncADC();
 
   if ( EEPROMData.enCorrection )
@@ -475,16 +489,22 @@ uint16_t ADC_Read(uint8_t ch)
   syncADC();
   ADC->INPUTCTRL.bit.MUXPOS = ch;
   ADC->INPUTCTRL.bit.MUXNEG = ADC_INPUTCTRL_MUXNEG_GND_Val;
+  syncADC();
 
   for ( int i = 0; i <= ADC_OVERSAMPLE_COUNT; i++ )
   {
+#if 0
     syncADC();
+
+// switched to free-running mode
     ADC->SWTRIG.bit.START = 1;
 
     while ( ADC->INTFLAG.bit.RESRDY == 0 ) ;
-
+#endif
     // read result - also clears RESRDY bit
     result = ADC->RESULT.bit.RESULT;
+//    ADC->INTFLAG.bit.RESRDY = 1;
+
     delay(ADC_SAMPLING_DELAY);
 
     // skip first measurement per datasheet
@@ -504,20 +524,21 @@ void ledRawRead(led_meas_t *m)
     // ----------------------
     // Read both ADC channels
     // ----------------------
-    m->intensityRaw = ADC_Read(SPECTRA_INTENSITY_OUT_PIN);
-    m->colorRaw = ADC_Read(SPECTRA_COLOR_OUT_PIN);
+    m->intensityCounts = ADC_Read(SPECTRA_INTENSITY_OUT_PIN);
+    delay(1000);
+    m->colorCounts = ADC_Read(SPECTRA_COLOR_OUT_PIN);
 
     // ----------------------
     // Calculate Intensity
     // Datasheet says the V corresponds to mcd!
     // ----------------------
-    m->vI = (m->intensityRaw * voltsPerCount) * ADCGain;
-    m->intensity = (uint16_t) m->vI;
+    m->vI = m->intensityCounts * voltsPerCount * ADCGain;
+    m->intensity = (uint16_t) (m->intensityCounts * 0.0002);
 
     // ----------------------
     // Calculate Color
     // ----------------------
-    m->vC = (m->colorRaw * voltsPerCount) * ADCGain;
+    m->vC = m->colorCounts * voltsPerCount * ADCGain;
 
     // formula from datasheet with K factor added in
     m->lv = ((m->vC + 4.0) * 100.0) * EEPROMData.K;
@@ -540,12 +561,15 @@ int readCmd(int arg)
 {
     led_meas_t          *m = &currentMeasurement;
 
+    SerialUSB.println("Acquiring data, please wait...");
+    SerialUSB.flush();
+
     ledRawRead(m);
 
-    sprintf(outBfr, "Intensity: %4d mcd %4d %5.3f V", (int) m->intensity, m->intensityRaw, m->vI);
+    sprintf(outBfr, "Intensity: %4d mcd %4d %5.3f V", (int) m->intensity, m->intensityCounts, m->vI);
     SerialUSB.println(outBfr);
 
-    sprintf(outBfr, "    Color: %4d nm  %4d %5.3f V", (int) m->lv, m->colorRaw, m->vC);
+    sprintf(outBfr, "    Color: %4d nm  %4d %5.3f V", (int) m->lv, m->colorCounts, m->vC);
     SerialUSB.println(outBfr);
 
     return(0);
@@ -589,21 +613,23 @@ int readTemp(int arg)
 //===================================================================
 int readLoop(int arg)
 {
-  SerialUSB.println("Entering continuous loop, press any key to stop");
+  SerialUSB.println("Entering continuous read loop, press any key to stop");
 
   while ( SerialUSB.available() == 0 )
   {
-    readCmd(0);
-    readTemp(0);
-    SerialUSB.println(" ");
-    delay(1000);
-    SerialUSB.flush();
+      readCmd(0);
+      readTemp(0);
+      SerialUSB.println(" ");
+      delay(1000);
+      SerialUSB.flush();
   }
 
   // flush any other chars user hit when exiting the loop
   while ( SerialUSB.available() )
     (void) SerialUSB.read();
 
+  SerialUSB.println("Loop aborted by user");
+  SerialUSB.flush();
   return(0);
 }
 // --------------------------------------------
@@ -935,7 +961,6 @@ void loop()
                     byteIn = SerialUSB.read();
                     if ( byteIn == 'A' )
                     {
-                        doPrompt();
                         SerialUSB.println(lastCmd);
                         cli(lastCmd);
                     }
