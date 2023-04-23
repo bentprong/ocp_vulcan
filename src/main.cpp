@@ -33,8 +33,8 @@
 
 // Versions
 // 1.1.x was Microchip Studio then MPLAB (2022): both tools unstable/unsuitable
-// 1.2.x is PlatformIO/VSCode (2023)
-const char      versString[] = "1.2.2";
+// 1.2+ is PlatformIO/VSCode (2023)
+const char      versString[] = "1.3.0";
 
 // CLI Command Table structure
 typedef struct {
@@ -61,23 +61,30 @@ typedef struct {
 // LED measurement
 typedef struct {
     float       lv;
-    float       vC;
+    float       Vout_Color;
     uint16_t    colorCounts;
 
     uint16_t    intensity;
-    float       vI;
+    float       Vout_Intensity;
     uint16_t    intensityCounts;
 
 } led_meas_t;
 
 // Constant Data
-const char      hello[] = "Dell Vulcan/OCP LED Text Fixture (LTF) V";
+const char      hello[] = "OCP Vulcan LED Text Fixture (LTF) V ";
 const char      cliPrompt[] = "ltf> ";
 const int       promptLen = sizeof(cliPrompt);
 const float     ADCGain = 2.0;
 const float     ADCVrefA = 2.5;
 const float     voltsPerCount = ADCVrefA / 4095.0;
-const uint32_t  EEPROM_signature = 0xDE110C01;  // "DeLL Open Compute 01"
+const uint32_t  EEPROM_signature = 0xDE110C01;
+
+// calibration data for use with 1P5KH calibration board rev  X00
+// that board is marked '2.7' on bottom of small PCB glued to blue board
+const float     amberLED_Intensity = 7.53;
+const float     amberLED_Wavelength = 584.5;
+const float     greenLED_Intensity = 45.8;
+const float     greenLED_Wavelength = 526.8;
 
 // Variable data
 uint16_t        ADC_resultsArray[ADC_OVERSAMPLE_COUNT+1];
@@ -93,6 +100,7 @@ void EEPROM_Save(void);
 void ADC_EnableCorrection(void);
 uint16_t ADC_Read(uint8_t ch);
 int waitAnyKey(void);
+void ledRawRead(led_meas_t *m);
 
 // prototypes for CLI-called functions
 // template is func_name(int) because the int arg is the arg
@@ -236,16 +244,29 @@ bool cli(char *raw)
 // --------------------------------------------
 int calib(int arg)
 {
-    int       keyPressed;
+    int           keyPressed;
+    led_meas_t    data;
+    float         temp_K;
 
-    SerialUSB.println("Power the LTF Calibration Board and select the GREEN LED now.");
+    SerialUSB.println("Power up the LTF Calibration Board and select the GREEN LED now.");
     SerialUSB.println("Press 'y' to begin calibration, or 'n' to exit.");
     keyPressed = toupper(waitAnyKey());
     if ( keyPressed != 'Y' )
         return(0);
 
+    SerialUSB.println("Align the Spectra probe with the calibration LED then press any key");
+    (void) waitAnyKey();
     SerialUSB.println("Starting measurements, please wait...");
+    ledRawRead(&data);
 
+    // K = lv_constant / Vout**2
+    temp_K = greenLED_Intensity / pow(data.Vout_Intensity, 2);
+
+    sprintf(outBfr, "Calculated K = %f", temp_K);
+    SerialUSB.println(outBfr);
+
+    EEPROMData.K = temp_K;
+    EEPROM_Save();
     return(0);
 }
 
@@ -274,7 +295,7 @@ void debug_scan(void)
     Wire.beginTransmission(i);
     if (Wire.endTransmission() == 0)
     {
-      sprintf(outBfr, "Found device at address %d 0x%2X", i, i);
+      sprintf(outBfr, "Found deVout_Intensityce at address %d 0x%2X", i, i);
       SerialUSB.println(outBfr);
       count++;
       delay(10);  
@@ -289,12 +310,12 @@ void debug_scan(void)
 
   if ( count )
   {
-    sprintf(outBfr, "Found %d I2C device(s)", count);
+    sprintf(outBfr, "Found %d I2C deVout_Intensityce(s)", count);
     SerialUSB.println(outBfr);
   }
   else
   {
-    SerialUSB.println("No I2c device found");
+    SerialUSB.println("No I2c deVout_Intensityce found");
   }
 }
 
@@ -525,23 +546,25 @@ void ledRawRead(led_meas_t *m)
     // Read both ADC channels
     // ----------------------
     m->intensityCounts = ADC_Read(SPECTRA_INTENSITY_OUT_PIN);
-    delay(1000);
-    m->colorCounts = ADC_Read(SPECTRA_COLOR_OUT_PIN);
 
     // ----------------------
     // Calculate Intensity
-    // Datasheet says the V corresponds to mcd!
     // ----------------------
-    m->vI = m->intensityCounts * voltsPerCount * ADCGain;
-    m->intensity = (uint16_t) (m->intensityCounts * 0.0002);
+    m->Vout_Intensity = m->intensityCounts * voltsPerCount * ADCGain;
+    float temp = (m->Vout_Intensity * 2.0);
+    temp = pow(temp, 2);
+    temp *= EEPROMData.K;
+    m->intensity = (uint16_t) temp;
 
     // ----------------------
     // Calculate Color
     // ----------------------
-    m->vC = m->colorCounts * voltsPerCount * ADCGain;
+    m->colorCounts = ADC_Read(SPECTRA_COLOR_OUT_PIN);
+    m->Vout_Color = m->colorCounts * voltsPerCount * ADCGain;
 
     // formula from datasheet with K factor added in
-    m->lv = ((m->vC + 4.0) * 100.0) * EEPROMData.K;
+    m->lv = m->Vout_Color * EEPROMData.K; 
+    m->
 }
   /* removed, because 2.5V supply fluctuates constantly causing measurements to vary
     // ----------------------
@@ -566,10 +589,10 @@ int readCmd(int arg)
 
     ledRawRead(m);
 
-    sprintf(outBfr, "Intensity: %4d mcd %4d %5.3f V", (int) m->intensity, m->intensityCounts, m->vI);
+    sprintf(outBfr, "Intensity: %4d mcd %4d %5.3f V", (int) m->intensity, m->intensityCounts, m->Vout_Intensity);
     SerialUSB.println(outBfr);
 
-    sprintf(outBfr, "    Color: %4d nm  %4d %5.3f V", (int) m->lv, m->colorCounts, m->vC);
+    sprintf(outBfr, "    Color: %4d nm  %4d %5.3f V", (int) m->lv, m->colorCounts, m->Vout_Color);
     SerialUSB.println(outBfr);
 
     return(0);
@@ -830,7 +853,7 @@ bool EEPROM_InitLocal(void)
       // is OK over resets and power cycles.  
       EEPROM_Defaults();
 
-      // save EEPROM data on the device
+      // save EEPROM data on the deVout_Intensityce
       EEPROM_Save();
 
       rc = true;

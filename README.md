@@ -4,6 +4,8 @@ Written by Richard Lewis rlewis@astlenterprises.com for Fusion Manufacturing Ser
 Posted January 15, 2023 at https://github.com/bentprong/ocp_vulcan
 Initial Firmware Release: v1.2.1
 
+## Release v1.3.0 April 19, 2023
+
 Overview
 ========
 These instructions have been tested on Windows and Mac.  If you are using a variant of Linux, the
