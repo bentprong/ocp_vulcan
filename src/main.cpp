@@ -60,13 +60,13 @@ typedef struct {
 
 // LED measurement
 typedef struct {
-    float       lv;
-    float       Vout_Color;
     uint16_t    colorCounts;
+    float       Vout_Color;
+    float       wavelength;
 
-    uint16_t    intensity;
-    float       Vout_Intensity;
     uint16_t    intensityCounts;
+    float       Vout_Intensity;
+    float       intensity;
 
 } led_meas_t;
 
@@ -139,6 +139,12 @@ const cli_entry     cmdTable[] = {
 // --------------------------------------------
 // doPrompt() - Write prompt to terminal
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 void doPrompt(void)
 {
     SerialUSB.println(" ");
@@ -149,6 +155,12 @@ void doPrompt(void)
 // --------------------------------------------
 // cli() - Command Line Interpreter
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 bool cli(char *raw)
 {
     bool         rc = false;
@@ -242,6 +254,12 @@ bool cli(char *raw)
 // --------------------------------------------
 // calib() - automatic LED calibration
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 int calib(int arg)
 {
     int           keyPressed;
@@ -249,15 +267,17 @@ int calib(int arg)
     float         temp_K;
 
     SerialUSB.println("Power up the LTF Calibration Board and select the GREEN LED now.");
+    SerialUSB.println("Align the Spectra probe with the GREEN calibration LED.");
     SerialUSB.println("Press 'y' to begin calibration, or 'n' to exit.");
     keyPressed = toupper(waitAnyKey());
     if ( keyPressed != 'Y' )
         return(0);
 
-    SerialUSB.println("Align the Spectra probe with the calibration LED then press any key");
-    (void) waitAnyKey();
     SerialUSB.println("Starting measurements, please wait...");
     ledRawRead(&data);
+
+    sprintf(outBfr, "Spectra intensity: %4d cnts  %5.3f V", data.intensityCounts, data.Vout_Intensity);
+    SerialUSB.println(outBfr);
 
     // K = lv_constant / Vout**2
     temp_K = greenLED_Intensity / pow(data.Vout_Intensity, 2);
@@ -267,6 +287,7 @@ int calib(int arg)
 
     EEPROMData.K = temp_K;
     EEPROM_Save();
+    SerialUSB.println("K stored in EEPROM OK");
     return(0);
 }
 
@@ -281,6 +302,12 @@ int calib(int arg)
 // this was developed in order to locate the
 // temp sensor. Left in for future use.
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 void debug_scan(void)
 {
   byte        count = 0;
@@ -295,7 +322,7 @@ void debug_scan(void)
     Wire.beginTransmission(i);
     if (Wire.endTransmission() == 0)
     {
-      sprintf(outBfr, "Found deVout_Intensityce at address %d 0x%2X", i, i);
+      sprintf(outBfr, "Found device at address %d 0x%2X", i, i);
       SerialUSB.println(outBfr);
       count++;
       delay(10);  
@@ -322,6 +349,12 @@ void debug_scan(void)
 // --------------------------------------------
 // debug_reset() - force board reset
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 void debug_reset(void)
 {
     SerialUSB.println("Board reset will disconnect USB-serial connection now.");
@@ -333,6 +366,12 @@ void debug_reset(void)
 // --------------------------------------------
 // debug_dump_eeprom() - Dump EEPROM contents
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 void debug_dump_eeprom(void)
 {
     SerialUSB.println("EEPROM Contents:");
@@ -342,9 +381,9 @@ void debug_dump_eeprom(void)
     SerialUSB.print("K Constant:   ");
     SerialUSB.println(outBfr);
 
+    SerialUSB.print("ADC Correct:   ");
     if ( EEPROMData.enCorrection )
     {
-      SerialUSB.print("ADC Correct:   ");
       SerialUSB.println("Enabled");
       SerialUSB.print("Gain ERR:   ");
       SerialUSB.println(EEPROMData.gainError, DEC);
@@ -355,6 +394,12 @@ void debug_dump_eeprom(void)
       SerialUSB.println("Disabled");
 }
 
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 void debug_read(void)
 {
     uint16_t            rawCounts;
@@ -379,31 +424,52 @@ void debug_read(void)
     }
 }
 
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
+void debugHelp(void)
+{
+    SerialUSB.println("Debug commands are:");
+    SerialUSB.println("\ti2c ...... I2C bus scanner");
+    SerialUSB.println("\treset .... Reset board");
+    SerialUSB.println("\teeprom ... Dump EEPROM");
+    SerialUSB.println("\tadc ...... Raw ADC read (channels 0-5)");
+}
+
 // --------------------------------------------
 // debug() - Main debug program
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 int debug(int arg)
 {
     if ( arg == 0 )
     {
-        SerialUSB.println("Debug commands are:");
-        SerialUSB.println("\tscan ... I2C bus scanner");
-        SerialUSB.println("\treset .. Reset board");
-        SerialUSB.println("\tdump ... Dump EEPROM");
-        SerialUSB.println("\tread ... Raw ADC read (channels 0-3)");
+        debugHelp();
         return(0);
     }
 
-    if ( strcmp(tokens[1], "scan") == 0 )
+    if ( strcmp(tokens[1], "i2c") == 0 )
       debug_scan();
     else if ( strcmp(tokens[1], "reset") == 0 )
       debug_reset();
-    else if ( strcmp(tokens[1], "dump") == 0 )
+    else if ( strcmp(tokens[1], "eeprom") == 0 )
       debug_dump_eeprom();
-    else if ( strcmp(tokens[1], "read") == 0 )
+    else if ( strcmp(tokens[1], "adc") == 0 )
       debug_read();
     else
-      SerialUSB.println("Invalid debug command");
+    {
+      SerialUSB.println("Invalid debug subcommand");
+      debugHelp();
+      return(1);
+    }
 
     return(0);
 }
@@ -415,6 +481,12 @@ int debug(int arg)
 // --------------------------------------------
 // syncADC() - Wait for ADC sync complete
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 static void syncADC() 
 {
   while (ADC->STATUS.bit.SYNCBUSY) {};
@@ -423,6 +495,12 @@ static void syncADC()
 // --------------------------------------------
 // ADC_Init() - Initialze the ADC
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 void ADC_Init(void)
 {
   uint32_t        bias, linearity;
@@ -454,14 +532,13 @@ void ADC_Init(void)
 
   // set clock prescalar & resolution
   // this sets ADC to run at 31.25 kHz
-//  ADC->CTRLB.reg = ADC_CTRLB_PRESCALER_DIV4 | ADC_CTRLB_RESSEL_12BIT;
+  // set to free running
   ADC->CTRLB.bit.PRESCALER = ADC_CTRLB_PRESCALER_DIV4_Val;
   ADC->CTRLB.bit.RESSEL = ADC_CTRLB_RESSEL_12BIT_Val;
   ADC->CTRLB.bit.FREERUN = 1;
 
   // adjust sample time for possible input impediance (allow ADC to charge cap)
   ADC->SAMPCTRL.reg = ADC_SAMPCTRL_SAMPLEN(1);
-
   ADC->INPUTCTRL.reg = ADC_INPUTCTRL_GAIN_DIV2;
   syncADC();
 
@@ -478,6 +555,12 @@ void ADC_Init(void)
 // --------------------------------------------
 // ADC_EnableCorrection - not in use
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 void ADC_EnableCorrection(void)
 {
 // set offset and gain correction values 
@@ -502,6 +585,12 @@ void ADC_EnableCorrection(void)
 // --------------------------------------------
 // ADC_Read() - read ADC channel as 16-bits
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 uint16_t ADC_Read(uint8_t ch)
 {
   uint16_t      result;
@@ -524,10 +613,9 @@ uint16_t ADC_Read(uint8_t ch)
 #endif
     // read result - also clears RESRDY bit
     result = ADC->RESULT.bit.RESULT;
-//    ADC->INTFLAG.bit.RESRDY = 1;
 
     delay(ADC_SAMPLING_DELAY);
-
+//    delayMicroseconds(250);
     // skip first measurement per datasheet
     if ( i == 0 )
       continue;
@@ -540,46 +628,44 @@ uint16_t ADC_Read(uint8_t ch)
   return(result);
 }
 
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 void ledRawRead(led_meas_t *m)
 {
+    float         temp;
+
     // ----------------------
-    // Read both ADC channels
+    // Read Intensity ch
     // ----------------------
     m->intensityCounts = ADC_Read(SPECTRA_INTENSITY_OUT_PIN);
+    m->Vout_Intensity = m->intensityCounts * voltsPerCount * ADCGain;
 
     // ----------------------
     // Calculate Intensity
+    // lv = Vout^2 * K mcd
     // ----------------------
-    m->Vout_Intensity = m->intensityCounts * voltsPerCount * ADCGain;
-    float temp = (m->Vout_Intensity * 2.0);
-    temp = pow(temp, 2);
-    temp *= EEPROMData.K;
-    m->intensity = (uint16_t) temp;
+    m->intensity = pow(m->Vout_Intensity, 2) * EEPROMData.K;
 
     // ----------------------
-    // Calculate Color
+    // Read & calculate Color
+    // wl = (100(Vout + 4) nm
     // ----------------------
     m->colorCounts = ADC_Read(SPECTRA_COLOR_OUT_PIN);
     m->Vout_Color = m->colorCounts * voltsPerCount * ADCGain;
+    m->wavelength = 100.0 * (m->Vout_Color + 4.0);
 
-    // formula from datasheet with K factor added in
-    m->lv = m->Vout_Color * EEPROMData.K; 
-    m->
-}
-  /* removed, because 2.5V supply fluctuates constantly causing measurements to vary
-    // ----------------------
-    // Read ADC Vref (2.5V)
-    // ----------------------
-    m->aRefRaw = ADC_Read(ADC_VREF_PIN) * ADCGain;
-    m->aRef = m->aRefRaw  * voltsPerCount;
-    voltsPerCount = m->aRef  / 4095;
-    sprintf(outBfr, "ADC Vref:           %4d %5.3f V", (int) m->aRefRaw, m->aRef);
-    SerialUSB.println(outBfr);
-    */
+} // ledRawRead()
 
-//===================================================================
-//                               READ Command
-//===================================================================
+/**
+  * @name   readCmd
+  * @brief  read Spectra probe data
+  * @param  arg not used
+  * @retval not used
+  */
 int readCmd(int arg)
 {
     led_meas_t          *m = &currentMeasurement;
@@ -589,10 +675,10 @@ int readCmd(int arg)
 
     ledRawRead(m);
 
-    sprintf(outBfr, "Intensity: %4d mcd %4d %5.3f V", (int) m->intensity, m->intensityCounts, m->Vout_Intensity);
+    sprintf(outBfr, "Intensity: %7.3f mcd %4d cnts %5.3f V (K=%5.3f)", m->intensity, m->intensityCounts, m->Vout_Intensity, EEPROMData.K);
     SerialUSB.println(outBfr);
 
-    sprintf(outBfr, "    Color: %4d nm  %4d %5.3f V", (int) m->lv, m->colorCounts, m->Vout_Color);
+    sprintf(outBfr, "    Color: %7.3f nm %4d  cnts %5.3f V", m->wavelength, m->colorCounts, m->Vout_Color);
     SerialUSB.println(outBfr);
 
     return(0);
@@ -602,6 +688,12 @@ int readCmd(int arg)
 //===================================================================
 //                              TEMP Command
 //===================================================================
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 int readTemp(int arg)
 {
   signed char         i2cData;
@@ -634,6 +726,12 @@ int readTemp(int arg)
 //===================================================================
 //                             CHECK Command
 //===================================================================
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 int readLoop(int arg)
 {
   SerialUSB.println("Entering continuous read loop, press any key to stop");
@@ -660,6 +758,12 @@ int readLoop(int arg)
 //
 // WARNING: This is a blocking call!
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 int waitAnyKey(void)
 {
     int             charIn;
@@ -674,6 +778,12 @@ int waitAnyKey(void)
 //===================================================================
 //                               HELP Command
 //===================================================================
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 int help(int arg)
 {
 
@@ -712,6 +822,12 @@ int help(int arg)
 // 
 // Supported parameters: k, gain, offset
 //===================================================================
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 int setK(int arg)
 {
     char          *parameter = tokens[1];
@@ -794,6 +910,12 @@ int setK(int arg)
 // EEPROM_Save() - write EEPROM structure to
 // the EEPROM
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 void EEPROM_Save(void)
 {
     uint8_t         *p = (uint8_t *) &EEPROMData;
@@ -810,6 +932,12 @@ void EEPROM_Save(void)
 // --------------------------------------------
 // EEPROM_Read() - Read struct from EEPROM
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 void EEPROM_Read(void)
 {
     uint8_t         *p = (uint8_t *) &EEPROMData;
@@ -824,6 +952,12 @@ void EEPROM_Read(void)
 // --------------------------------------------
 // EEPROM_Defaults() - Set defaults in struct
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 void EEPROM_Defaults(void)
 {
     EEPROMData.sig = EEPROM_signature;
@@ -838,6 +972,12 @@ void EEPROM_Defaults(void)
 //
 // Returns false if no error, else true
 // --------------------------------------------
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 bool EEPROM_InitLocal(void)
 {
     bool          rc = false;
@@ -870,6 +1010,12 @@ bool EEPROM_InitLocal(void)
 //===================================================================
 //                      setup() - Initialization
 //===================================================================
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 void setup() 
 {
   bool      LEDstate = false;
@@ -885,7 +1031,7 @@ void setup()
   PORT->Group[1].PINCFG[9].reg |= PORT_PINCFG_PMUXEN;
 
   // see section 7.1 in SAMD21 datasheet - multiplexed signals
-  // this is a bit wonky; this is vague about the odd/even pins partly
+  // this is a bit wonky; datasheet is vague about the odd/even pins partly
   // due to Arduino abstraction, and partly because it's just not clear...
   PORT->Group[1].PMUX[3].reg = PORT_PMUX_PMUXO_B;
   PORT->Group[1].PMUX[4].reg = PORT_PMUX_PMUXO_B;
@@ -933,6 +1079,12 @@ void setup()
 // terminated input line has been received, it calls the CLI to
 // parse and execute any valid command, or sends an error message.
 //===================================================================
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
 void loop() 
 {
   int             byteIn;
@@ -1012,3 +1164,10 @@ void loop()
   }
 
 } // loop()
+
+/**
+  * @name   
+  * @brief  
+  * @param  None
+  * @retval None
+  */
