@@ -79,7 +79,7 @@ typedef struct {
 const char      hello[] = "\r\nOCP Vulcan LED Text Fixture (LTF) V ";
 const char      cliPrompt[] = "ltf> ";
 const int       promptLen = sizeof(cliPrompt);
-const float     ADCGain = 4.0;
+const float     ADCGain = 2.0;
 const float     ADCVrefA = 2.5;
 const float     voltsPerCount = ADCVrefA / 4095.0;
 const uint32_t  EEPROM_signature = 0xDE110C01;
@@ -350,7 +350,7 @@ int calib(int arg)
 
     EEPROMData.K = temp_K;
     EEPROM_Save();
-    SHOW("K stored in EEPROM OK");
+    SHOW("K stored in EEPROM");
     calibRequired = false;
     return(0);
 }
@@ -582,7 +582,7 @@ void ADC_Init(void)
 
   // adjust sample time for possible input impediance (allow ADC to charge cap)
   ADC->SAMPCTRL.reg = ADC_SAMPCTRL_SAMPLEN(1);
-  ADC->INPUTCTRL.reg = ADC_INPUTCTRL_GAIN_DIV2;
+  ADC->INPUTCTRL.reg = ADC_INPUTCTRL_GAIN_1X; // ADC_INPUTCTRL_GAIN_DIV2;
   syncADC();
 
   if ( EEPROMData.enCorrection )
@@ -1046,19 +1046,19 @@ bool EEPROM_InitLocal(void)
     if ( EEPROMData.sig != EEPROM_signature )
     {
       // EEPROM failed: either never been used, or real failure
-      // initialize the signature and settings
+      // initialize the signature and default settings
 
-      // FIXME: When debugging, EEPROM fails every time, but it
-      // is OK over resets and power cycles.  THis is because
+      // When debugging, EEPROM fails every time, but it
+      // is OK over resets and power cycles.  This is because
       // the area in FLASH where the EEPROM is simulated is
       // erased for debugging 
       EEPROM_Defaults();
 
-      // save EEPROM data on the deVout_Intensityce
+      // save EEPROM data on the device
       EEPROM_Save();
 
       rc = false;
-      SHOW("EEPROM validation FAILED, EEPROM initialized OK");
+      SHOW("EEPROM validation FAILED, EEPROM initialized with defaults");
     }
     else
     {

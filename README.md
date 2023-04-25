@@ -1,10 +1,23 @@
 # ocp_vulcan
-Dell OCP Vulcan LED Text Fixture (LTF)
+OCP Vulcan LED Text Fixture (LTF)
 Written by Richard Lewis rlewis@astlenterprises.com for Fusion Manufacturing Services
 Posted January 15, 2023 at https://github.com/bentprong/ocp_vulcan
 Initial Firmware Release: v1.2.1
 
-## Release v1.3.0 April 19, 2023
+## Release v1.3.0 April 25, 2023
+1. Updated CLI and help to be clearer
+2. Completed the calibration process (green LED only)
+3. Updated color & intensity equations 
+4. Added the 'vers' command to show the firmware version and build date/time
+5. Wrapped SerialUSB.print[ln] to help with dropped characters on USB terminal
+6. Replaced function headers with doxygen style blocks
+7. Fixed compiler warnings
+8. Changed ADC internal gain from ADC_INPUTCTRL_GAIN_DIV2 to ADC_INPUTCTRL_GAIN_1X which is what
+it originally was, but it was changed during ADC debug and never changed back.  Now the fiwmare
+ADC gain of 2 is correct - due to the voltage divider resistors R1/R2 and R3/R4
+9. *** IMPORTANT NOTE *** The op amp U1 must be removed for proper operation of the board.  There
+is an issue when the input to the op amp falls below 1.0V - the output goes up.  After removing
+the op amp, short U1 pads 1-3 and 5-7 INx => OUTx (x=a,b)
 
 Overview
 ========
@@ -36,22 +49,22 @@ applied to the auto correction - ADC was too fast for the sensor.
 
 Operating Instructions
 ======================
-Important Note:  The LED sensor must be manually calibrated using a separate procedure before using the
+Important Note:  The LED sensor must be calibrated using the 'calib' cmd before using the
 Led Test Fixture to measure LEDs.  When the calibration is complete, the K constant from the calibration
-has to be entered into the Vulcan firmware and saved to EEPROM.  At the "ltf>" prompt, enter this
-command to set and save the K constant:
+will automatically be saved to EEPROM.  At the "ltf>" prompt, enter this
+command to set and save the K constant manually (not recommended unless the board was erased):
     set k 9.999<ENTER>
 
 To confirm that the constant has been stored in EEPROM, enter this command:
-    debug dump<ENTER>
+    debug eeprom<ENTER>
 
 Here is an example setting and confirming the K constant to a value of 99.89 (<ENTER> not shown):
 ltf> set k 99.89  
 
-ltf> debug dump 
+ltf> xdebug eeprom 
 EEPROM Contents:
 Signature:     DE110C01
-K Constant:    99.8900
+K Constant:    12.89 (example K it varies with each Spectra probe)
 
 The signature should always be DE110C01.  Other data may be shown that is not relevant to use of
 the board to measure LEDs.
@@ -81,14 +94,8 @@ the same for both commands.
 
 Here is an example of the output for the read command:
     ltf> read 
-    ADC Vref:           4098 2.539 V
     Intensity:  964 mcd  482 0.299 V
         Color:  578 nm  2872 1.781 V
-
-For Intensity and Color, the format of each line is:
-<measurement> <value> <units> <raw ADC counts> <converted sensor voltage>
-
-The ADC Vref line lacks the <value> and <units> entries.  This will normally vary +/- 5% of 2.5V.
 
 You may also want to read the temperature of the board. To do that enter "temp<ENTER>".
     ltf> temp 
