@@ -19,10 +19,13 @@
 #define CMD_NAME_MAX                12
 #define MAX_LINE_SZ                 80
 #define OUTBFR_SIZE                 (MAX_LINE_SZ * 3)
+#define MAX_DATE_SZ                 30
+#define MAX_BOARD_ID_SZ             20
 
 // disable EEPROM/FLASH library driver debug, because it uses Serial 
 // not SerialUSB and may hang on startup as a result
 #define FLASH_DEBUG               0
+#define MAX_EEPROM_ADDR           1024
 
 // possible CLI errors
 #define CLI_ERR_NO_ERROR          0
@@ -48,8 +51,10 @@ typedef struct {
 
 // EEPROM data storage struct
 typedef struct {
-    uint32_t        sig;      // unique EEPROMP signature (see #define)
+    uint32_t        sig;      // unique EEPROM signature (see #define)
     float           K;        // K constant for LED equations
+    char            boardID[MAX_BOARD_ID_SZ];
+    char            calibDate[MAX_DATE_SZ];
 
     // these were used in ADC driver development, not for production
     bool            enCorrection;
@@ -71,10 +76,10 @@ typedef struct {
 } led_meas_t;
 
 // Constant Data
-const char      hello[] = "OCP Vulcan LED Text Fixture (LTF) V ";
+const char      hello[] = "\r\nOCP Vulcan LED Text Fixture (LTF) V ";
 const char      cliPrompt[] = "ltf> ";
 const int       promptLen = sizeof(cliPrompt);
-const float     ADCGain = 2.0;
+const float     ADCGain = 4.0;
 const float     ADCVrefA = 2.5;
 const float     voltsPerCount = ADCVrefA / 4095.0;
 const uint32_t  EEPROM_signature = 0xDE110C01;
@@ -89,9 +94,10 @@ const float     greenLED_Wavelength = 526.8;
 // Variable data
 uint16_t        ADC_resultsArray[ADC_OVERSAMPLE_COUNT+1];
 char            outBfr[OUTBFR_SIZE];
+bool            calibRequired = false;
 
 // FLASH/EEPROM Data buffer
-EEPROM_data_t       EEPROMData;
+EEPROM_data_t   EEPROMData;
 
 // --------------------------------------------
 // Forward function prototypes
@@ -111,11 +117,12 @@ int help(int);
 int calib(int);
 int readCmd(int);
 int rawRead(int);
-int setK(int);
+int setCmd(int);
 int readLoop(int);
 int readTemp(int);
 int debug(int);
 int calib(int);
+int versCmd(int);
 
 // CLI token stack
 char                *tokens[MAX_TOKENS];
@@ -125,41 +132,54 @@ led_meas_t      currentMeasurement;
 // CLI command table
 // format is "command", function, required arg count, "help line 1", "help line 2" (2nd line can be NULL)
 const cli_entry     cmdTable[] = {
-    {"debug",    debug, -1, "Debug functions mostly for developer use.", "'debug reset' resets board; 'debug dump' dumps EEPROM"},
-    {"help",       help, 0, "THIS DOES NOT DISPLAY ON PURPOSE", " "},
-    {"check",  readLoop, 0, "Continuous loop reading raw sensor data.", "Hit any key to exit loop."},
-    {"read",    readCmd, 0, "Read LED color temperature and intensity.", " "},
-    {"temp",   readTemp, 0, "Read board (not MCU core) temperature sensor.", "Reports temperature in degrees C and F."},
-    {"set",        setK, 2, "Sets a stored parameter.", "set k 1.234 sets K constant."},
-    {"calib",     calib, 0, "Calibrate board LED sensor", "Uses LTF Calibration Board LEDs"},
+    {"calib",     calib,  0, "Calibrate board LED sensor",                     "Uses LTF Calibration Board LEDs"},
+    {"check",  readLoop,  0, "Continuous loop reading raw sensor data.",       "Hit any key to exit loop."},
+    {"help",       help,  0, "THIS DOES NOT DISPLAY ON PURPOSE",               " "},
+    {"read",    readCmd,  0, "Read LED color temperature and intensity.",      " "},
+    {"set",      setCmd,  2, "Sets value of a stored parameter.",              "eg 'set k 1.234' sets K constant to 1.234"},
+    {"temp",   readTemp,  0, "Read board (not MCU core) temperature sensor.",  "Reports temperature in degrees C and F."},
+    {"vers",    versCmd,  0, "Shows firmware version information.",            " "},
+    {"xdebug",    debug, -1, "Debug functions mostly for developer use.",      "'xdebug reset' resets board; 'xdebug eeprom' dumps EEPROM"},
 };
 
 #define CLI_ENTRIES     (sizeof(cmdTable) / sizeof(cli_entry))
+#define SHOW(x)         (terminalOut((char *) x))
+#define SHOWX()         (terminalOut(outBfr))
 
-// --------------------------------------------
-// doPrompt() - Write prompt to terminal
-// --------------------------------------------
 /**
-  * @name   
-  * @brief  
+  * @name   terminalOut
+  * @brief  wrapper to SerialUSB.print[ln]
+  * @param  msg to output
+  * @retval None
+  * @note   needed to address missing chars & skittish behavior
+  */
+void terminalOut(char *msg)
+{
+    SerialUSB.println(msg);
+    SerialUSB.flush();
+    delay(50);
+}
+
+/**
+  * @name   doPrompt
+  * @brief  output firmware prompt to terminal
   * @param  None
   * @retval None
   */
 void doPrompt(void)
 {
-    SerialUSB.println(" ");
+    SerialUSB.write(0x0a);
+    SerialUSB.write(0x0d);
+    SerialUSB.flush();
     SerialUSB.print(cliPrompt);
     SerialUSB.flush();
 }
 
-// --------------------------------------------
-// cli() - Command Line Interpreter
-// --------------------------------------------
 /**
-  * @name   
-  * @brief  
-  * @param  None
-  * @retval None
+  * @name   cli
+  * @brief  command line interpreter
+  * @param  raw   pointer to raw input line
+  * @retval true if command parsed OK, else false
   */
 bool cli(char *raw)
 {
@@ -186,8 +206,8 @@ bool cli(char *raw)
     tokens[tokNdx++] = token;
 
     // subsequent calls should parse any space-separated args into tokens[]
-    // note that what's stored in tokens[] are string pointers into the
-    // input array not the actual string token itself
+    // note that what's stored in tokens[] are pointers into the
+    // input string, not the actual string token itself
     while ( (token = (char *) strtok(NULL, delim)) != NULL && tokNdx < MAX_TOKENS )
     {
         tokens[tokNdx++] = token;
@@ -195,7 +215,7 @@ bool cli(char *raw)
 
     if ( tokNdx >= MAX_TOKENS )
     {
-        SerialUSB.println("Too many arguments in command line!");
+        SHOW("Too many arguments in command line!");
         doPrompt();
         return(false);
     }
@@ -233,13 +253,13 @@ bool cli(char *raw)
     if ( rc == false )
     {
         if ( error == CLI_ERR_CMD_NOT_FOUND )
-         SerialUSB.println("Invalid command");
+         SHOW("Invalid command");
         else if ( error == CLI_ERR_TOO_FEW_ARGS )
-          SerialUSB.println("Not enough arguments for this command, check help.");
+          SHOW("Not enough arguments for this command, check help.");
         else if ( error == CLI_ERR_TOO_MANY_ARGS )
-          SerialUSB.println("Too many arguments for this command, check help.");
+          SHOW("Too many arguments for this command, check help.");
         else
-          SerialUSB.println("Unknown parser s/w error");
+          SHOW("Unknown parser s/w error");
     }
 
     doPrompt();
@@ -247,17 +267,49 @@ bool cli(char *raw)
 
 } // cli()
 
-//===================================================================
-//                         CALIBRATION
-//===================================================================
-
-// --------------------------------------------
-// calib() - automatic LED calibration
-// --------------------------------------------
 /**
-  * @name   
-  * @brief  
-  * @param  None
+  * @name   waitAnyString
+  * @brief  wait for and capture any string entered by user
+  * @param  len max length of string
+  * @retval pointer to captured string
+  * @note   len subject to a max of 79
+  */
+char *waitAnyString(unsigned len)
+{
+    int           c;
+    static char   buffer[80];
+
+    if ( len > 79 )
+        len = 79;
+
+    memset(buffer, 0, len);
+
+    for ( unsigned i = 0; i < len && i < 79; i++ )
+    {
+        c = waitAnyKey();
+        if ( c == 0x0a || c == 0x0d )
+        {
+            buffer[i] = 0;
+            SerialUSB.write((const char *) "\r\n");
+            SerialUSB.flush();
+            break;
+        }
+
+        buffer[i] = (char) c;
+        SerialUSB.write((const char) c);
+        SerialUSB.flush();
+    }
+
+    if ( buffer[0] )
+      return(buffer);
+    else
+      return(NULL);
+}
+
+/**
+  * @name   calib
+  * @brief  calibrate K constant for Spectra probe
+  * @param  arg not used
   * @retval None
   */
 int calib(int arg)
@@ -265,29 +317,41 @@ int calib(int arg)
     int           keyPressed;
     led_meas_t    data;
     float         temp_K;
+    char          *s;
 
-    SerialUSB.println("Power up the LTF Calibration Board and select the GREEN LED now.");
-    SerialUSB.println("Align the Spectra probe with the GREEN calibration LED.");
-    SerialUSB.println("Press 'y' to begin calibration, or 'n' to exit.");
+    SHOW("Power up the LTF Calibration Board and select the GREEN LED now.");
+    SHOW("Align the Spectra probe with the GREEN calibration LED.");
+    SHOW("Press 'y' to begin calibration, or 'n' to exit.");
     keyPressed = toupper(waitAnyKey());
     if ( keyPressed != 'Y' )
         return(0);
 
-    SerialUSB.println("Starting measurements, please wait...");
+    SerialUSB.print("Today's date (any format): ");
+    SerialUSB.flush();
+
+    s = waitAnyString(MAX_DATE_SZ);
+    if ( s != NULL )
+    {
+        strcpy(EEPROMData.calibDate, s);
+        EEPROM_Save();
+    }
+
+    SHOW("Starting measurements, please wait...");
     ledRawRead(&data);
 
     sprintf(outBfr, "Spectra intensity: %4d cnts  %5.3f V", data.intensityCounts, data.Vout_Intensity);
-    SerialUSB.println(outBfr);
+    SHOWX();
 
     // K = lv_constant / Vout**2
     temp_K = greenLED_Intensity / pow(data.Vout_Intensity, 2);
 
     sprintf(outBfr, "Calculated K = %f", temp_K);
-    SerialUSB.println(outBfr);
+    SHOWX();
 
     EEPROMData.K = temp_K;
     EEPROM_Save();
-    SerialUSB.println("K stored in EEPROM OK");
+    SHOW("K stored in EEPROM OK");
+    calibRequired = false;
     return(0);
 }
 
@@ -295,16 +359,9 @@ int calib(int arg)
 //                     DEBUG FUNCTIONS
 //===================================================================
 
-// --------------------------------------------
-// debug_scan() - I2C bus scanner
-//
-// While not associated with the board function,
-// this was developed in order to locate the
-// temp sensor. Left in for future use.
-// --------------------------------------------
 /**
-  * @name   
-  * @brief  
+  * @name   debug_scan
+  * @brief  I2C bus scanner
   * @param  None
   * @retval None
   */
@@ -314,72 +371,66 @@ void debug_scan(void)
   int         scanCount = 0;
   uint32_t    startTime = millis();
 
-  SerialUSB.println ("Scanning I2C bus...");
+  SHOW ("Scanning I2C bus...");
 
-  for (byte i = 8; i < 120; i++)
+  for (byte i = 0; i < 128; i++)
   {
     scanCount++;
     Wire.beginTransmission(i);
     if (Wire.endTransmission() == 0)
     {
       sprintf(outBfr, "Found device at address %d 0x%2X", i, i);
-      SerialUSB.println(outBfr);
+      SHOWX();
       count++;
       delay(10);  
     } 
   } 
 
-  SerialUSB.print("Scan complete, addresses scanned:");
-  SerialUSB.print(scanCount);
-  SerialUSB.print(" in ");
-  SerialUSB.print(millis() - startTime);
-  SerialUSB.println(" ms");
+  sprintf(outBfr, "Scan complete, %d addresses scanned in %d msec", scanCount, (int) (millis() - startTime));
+  SHOWX();
 
   if ( count )
   {
     sprintf(outBfr, "Found %d I2C deVout_Intensityce(s)", count);
-    SerialUSB.println(outBfr);
+    SHOWX();
   }
   else
   {
-    SerialUSB.println("No I2c deVout_Intensityce found");
+    SHOW("No I2c device found");
   }
 }
 
-// --------------------------------------------
-// debug_reset() - force board reset
-// --------------------------------------------
 /**
-  * @name   
-  * @brief  
+  * @name   debug_reset
+  * @brief  reset board
   * @param  None
   * @retval None
   */
 void debug_reset(void)
 {
-    SerialUSB.println("Board reset will disconnect USB-serial connection now.");
-    SerialUSB.println("Repeat whatever steps you took to connect to the board.");
+    SHOW("Board reset will disconnect USB-serial connection now.");
+    SHOW("Repeat whatever steps you took to connect to the board.");
     delay(1000);
     NVIC_SystemReset();
 }
 
-// --------------------------------------------
-// debug_dump_eeprom() - Dump EEPROM contents
-// --------------------------------------------
 /**
-  * @name   
-  * @brief  
+  * @name   debug_dump_eeprom
+  * @brief  Dump EEPROM contents
   * @param  None
   * @retval None
   */
 void debug_dump_eeprom(void)
 {
-    SerialUSB.println("EEPROM Contents:");
-    SerialUSB.print("Signature:     ");
-    SerialUSB.println(EEPROMData.sig, HEX);
-    sprintf(outBfr, "%8.4f", EEPROMData.K);
-    SerialUSB.print("K Constant:   ");
-    SerialUSB.println(outBfr);
+    SHOW("EEPROM Contents:");
+    sprintf(outBfr, "Signature:     %08X", (unsigned int) EEPROMData.sig);
+    SHOWX();
+    sprintf(outBfr, "K Constant:    %8.4f", EEPROMData.K);
+    SHOWX();
+    sprintf(outBfr, "Board ID:      %s", EEPROMData.boardID);
+    SHOWX();
+    sprintf(outBfr, "Calib Date:    %s", EEPROMData.calibDate);
+    SHOWX();
 
     SerialUSB.print("ADC Correct:   ");
     if ( EEPROMData.enCorrection )
@@ -395,8 +446,8 @@ void debug_dump_eeprom(void)
 }
 
 /**
-  * @name   
-  * @brief  
+  * @name   debug_read
+  * @brief  read ADC channels 0-5 and display
   * @param  None
   * @retval None
   */
@@ -414,39 +465,36 @@ void debug_read(void)
         sprintf(outBfr, "Ch %d %4d %8.3f V ", i, rawCounts, volts);
         SerialUSB.print(outBfr);
         if ( i == 1 )
-          SerialUSB.println("ARef");
+          SHOW("ARef");
         else if ( i == 2 )
-          SerialUSB.println("Color");
+          SHOW("Color");
         else if ( i ==3 )
-          SerialUSB.println("Intensity");
+          SHOW("Intensity");
         else
-          SerialUSB.println("not used");
+          SHOW("not used");
     }
 }
 
 /**
-  * @name   
-  * @brief  
+  * @name   debugHelp
+  * @brief  help for debug cmd
   * @param  None
   * @retval None
   */
 void debugHelp(void)
 {
-    SerialUSB.println("Debug commands are:");
-    SerialUSB.println("\ti2c ...... I2C bus scanner");
-    SerialUSB.println("\treset .... Reset board");
-    SerialUSB.println("\teeprom ... Dump EEPROM");
-    SerialUSB.println("\tadc ...... Raw ADC read (channels 0-5)");
+    SHOW("Debug commands are:");
+    SHOW("\ti2c ...... I2C bus scanner");
+    SHOW("\treset .... Reset board");
+    SHOW("\teeprom ... Dump EEPROM");
+    SHOW("\tadc ...... Raw ADC read (channels 0-5)");
 }
 
-// --------------------------------------------
-// debug() - Main debug program
-// --------------------------------------------
 /**
-  * @name   
-  * @brief  
-  * @param  None
-  * @retval None
+  * @name   debug
+  * @brief  main debug program
+  * @param  arg   argument count in cmd line
+  * @retval 0=OK 1=error
   */
 int debug(int arg)
 {
@@ -466,7 +514,7 @@ int debug(int arg)
       debug_read();
     else
     {
-      SerialUSB.println("Invalid debug subcommand");
+      SHOW("Invalid debug subcommand");
       debugHelp();
       return(1);
     }
@@ -478,26 +526,21 @@ int debug(int arg)
 //                            ADC Stuff
 //===================================================================
 
-// --------------------------------------------
-// syncADC() - Wait for ADC sync complete
-// --------------------------------------------
 /**
-  * @name   
-  * @brief  
+  * @name   syncADC
+  * @brief  wait for ADC sync complete
   * @param  None
   * @retval None
+  * @note   Warning! Blocking call!
   */
 static void syncADC() 
 {
   while (ADC->STATUS.bit.SYNCBUSY) {};
 }
 
-// --------------------------------------------
-// ADC_Init() - Initialze the ADC
-// --------------------------------------------
 /**
-  * @name   
-  * @brief  
+  * @name   ADC_Init
+  * @brief  Init ADC
   * @param  None
   * @retval None
   */
@@ -552,14 +595,12 @@ void ADC_Init(void)
   syncADC();
 }
 
-// --------------------------------------------
-// ADC_EnableCorrection - not in use
-// --------------------------------------------
 /**
-  * @name   
-  * @brief  
+  * @name   ADC_EnableCorrection
+  * @brief  enable ADC auto-correction
   * @param  None
   * @retval None
+  * @note   not used, kept for legacy purposes
   */
 void ADC_EnableCorrection(void)
 {
@@ -582,14 +623,11 @@ void ADC_EnableCorrection(void)
 
 }
 
-// --------------------------------------------
-// ADC_Read() - read ADC channel as 16-bits
-// --------------------------------------------
 /**
-  * @name   
-  * @brief  
-  * @param  None
-  * @retval None
+  * @name   ADC_Read
+  * @brief  read an ADC channel as 16 bits
+  * @param  ch  channel number 0..7
+  * @retval uint16_t adc value
   */
 uint16_t ADC_Read(uint8_t ch)
 {
@@ -629,15 +667,13 @@ uint16_t ADC_Read(uint8_t ch)
 }
 
 /**
-  * @name   
-  * @brief  
-  * @param  None
+  * @name   ledRawRead
+  * @brief  read Spectra sensor data for LED
+  * @param  m pointer to measurement structure to populate
   * @retval None
   */
 void ledRawRead(led_meas_t *m)
 {
-    float         temp;
-
     // ----------------------
     // Read Intensity ch
     // ----------------------
@@ -663,34 +699,40 @@ void ledRawRead(led_meas_t *m)
 /**
   * @name   readCmd
   * @brief  read Spectra probe data
-  * @param  arg not used
+  * @param  arg 15 don't show acquisition msg
   * @retval not used
   */
 int readCmd(int arg)
 {
     led_meas_t          *m = &currentMeasurement;
 
-    SerialUSB.println("Acquiring data, please wait...");
-    SerialUSB.flush();
+    if ( calibRequired == true )
+    {
+        SHOW("Spectra probe requires calibration before use; use 'calib' command now.");
+        return(1);
+    }
+
+    if ( arg != 15 )
+    {
+        SHOW("\r\nAcquiring Spectra sensor data, please wait...");
+        SerialUSB.flush();
+    }
 
     ledRawRead(m);
 
     sprintf(outBfr, "Intensity: %7.3f mcd %4d cnts %5.3f V (K=%5.3f)", m->intensity, m->intensityCounts, m->Vout_Intensity, EEPROMData.K);
-    SerialUSB.println(outBfr);
+    SHOWX();
 
-    sprintf(outBfr, "    Color: %7.3f nm %4d  cnts %5.3f V", m->wavelength, m->colorCounts, m->Vout_Color);
-    SerialUSB.println(outBfr);
+    sprintf(outBfr, "    Color: %7.3f nm  %4d cnts %5.3f V", m->wavelength, m->colorCounts, m->Vout_Color);
+    SHOWX();
 
     return(0);
 
 } // readCmd()
 
-//===================================================================
-//                              TEMP Command
-//===================================================================
 /**
-  * @name   
-  * @brief  
+  * @name   readTemp
+  * @brief  read temperature
   * @param  None
   * @retval None
   */
@@ -714,33 +756,33 @@ int readTemp(int arg)
   curTemp = (short) i2cData;
   degF = ((curTemp * 9.0) / 5.0) + 32.0;
 
-  SerialUSB.print("Board temp: ");
-  SerialUSB.print(curTemp);
-  SerialUSB.print(" C/");
-  SerialUSB.print((int) degF, DEC);
-  SerialUSB.println(" F");
+  sprintf(outBfr, "Board temp: %d C/%d F", curTemp, (int) degF);
+  SHOWX();
 
   return(0);
 }
 
-//===================================================================
-//                             CHECK Command
-//===================================================================
 /**
-  * @name   
-  * @brief  
-  * @param  None
+  * @name   readLoop
+  * @brief  continuous loop reading LED data and temperature
+  * @param  arg not used
   * @retval None
   */
 int readLoop(int arg)
 {
-  SerialUSB.println("Entering continuous read loop, press any key to stop");
+  if ( calibRequired == true )
+  {
+      SHOW("Spectra probe requires calibration before use; use 'calib' command now.");
+      return(1);
+  }
+
+  SHOW("Entering continuous read loop, press any key to stop");
 
   while ( SerialUSB.available() == 0 )
   {
-      readCmd(0);
+      readCmd(15);
       readTemp(0);
-      SerialUSB.println(" ");
+      SHOW(" ");
       delay(1000);
       SerialUSB.flush();
   }
@@ -749,20 +791,17 @@ int readLoop(int arg)
   while ( SerialUSB.available() )
     (void) SerialUSB.read();
 
-  SerialUSB.println("Loop aborted by user");
+  SHOW("Loop aborted by user");
   SerialUSB.flush();
   return(0);
 }
-// --------------------------------------------
-// waitAnyKey() - wait for any key pressed
-//
-// WARNING: This is a blocking call!
-// --------------------------------------------
+
 /**
-  * @name   
-  * @brief  
+  * @name   waitAnyKey
+  * @brief  Wait for keyboard input
   * @param  None
-  * @retval None
+  * @retval int character pressed
+  * @note   This is a blocking call!
   */
 int waitAnyKey(void)
 {
@@ -775,25 +814,20 @@ int waitAnyKey(void)
     return(charIn);
 }
 
-//===================================================================
-//                               HELP Command
-//===================================================================
 /**
-  * @name   
-  * @brief  
+  * @name   help
+  * @brief  show command help (all)
   * @param  None
   * @retval None
   */
 int help(int arg)
 {
-
-    SerialUSB.println(" ");
-    SerialUSB.print(hello);
-    SerialUSB.println(versString);
-    SerialUSB.println("Enter a command then press ENTER. Some commands require arguments, which must");
-    SerialUSB.println("be separated from the command and other arguments by a space.");
-    SerialUSB.println("Up arrow repeats the last command; backspace or delete erases the last");
-    SerialUSB.println("character entered. Commands available are:");
+    sprintf(outBfr, "%s %s", hello, versString);
+    SHOWX();
+    SHOW("Enter a command then press ENTER. Some commands require arguments, which must");
+    SHOW("be separated from the command and other arguments by a space.");
+    SHOW("Up arrow repeats the last command; backspace or delete erases the last");
+    SHOW("character entered. Commands available are:");
 
     for ( int i = 0; i < (int) CLI_ENTRIES; i++ )
     {
@@ -801,12 +835,12 @@ int help(int arg)
         continue;
 
       sprintf(outBfr, "%s\t%s", cmdTable[i].cmd, cmdTable[i].help1);
-      SerialUSB.println(outBfr);
+      SHOWX();
 
-      if ( cmdTable[i].help2 != NULL )
+      if ( cmdTable[i].help2[0] != ' ' )
       {
         sprintf(outBfr, "\t%s", cmdTable[i].help2);
-        SerialUSB.println(outBfr);
+        SHOWX();
       }
 
       SerialUSB.flush();
@@ -815,26 +849,53 @@ int help(int arg)
     return(0);
 }
 
-//===================================================================
-//                              SET Command
-//
-// set <parameter> <value>
-// 
-// Supported parameters: k, gain, offset
-//===================================================================
 /**
-  * @name   
-  * @brief  
+  * @name   versCmd
+  * @brief  show firmware version
   * @param  None
   * @retval None
   */
-int setK(int arg)
+int versCmd(int argCnt)
+{
+    sprintf(outBfr, "Firmware version V%s built on %s at %s", versString, __DATE__, __TIME__);
+    terminalOut(outBfr);
+    return(0);
+}
+
+/**
+  * @name   setCmdHelp
+  * @brief  display help for set cmd
+  * @param  None
+  * @retval None
+  */
+void setCmdHelp(void)
+{
+    SHOW("Set command help; format 'set <param> <value>'");
+    SHOW("'set K 12.345' sets LED K constant to 12.345");
+    SHOW("'set bid 3' sets board ID to 3 (can also have chars eg 'MY BD 3'");
+}
+
+/**
+  * @name   setCmd
+  * @brief  set a parameter stored in EEPROM
+  * @param  argCnt  number of arguments in command line
+  * @param  tokens[1] parameter name
+  * @param  tokens[2] parameter value (format varies with param)
+  * @retval 0 if OK, else 1
+  */
+int setCmd(int argCnt)
 {
     char          *parameter = tokens[1];
     String        userEntry = tokens[2];
     float         fValue;
     int           iValue;
     bool          isDirty = false;
+
+    if ( argCnt == 0 )
+    {
+        setCmdHelp();
+        return(0);
+    }
 
     if ( strcmp(parameter, "k") == 0 )
     {
@@ -873,7 +934,7 @@ int setK(int arg)
           if ( EEPROMData.enCorrection == true )
           {
               EEPROMData.enCorrection = false;
-              SerialUSB.println("ADC correction off");
+              SHOW("ADC correction off");
               isDirty = true;
           }
         }
@@ -887,17 +948,28 @@ int setK(int arg)
         }
         else
         {
-          SerialUSB.println("Invalid ADC corr argument: must be 'on' or 'off'");
+          SHOW("Invalid ADC corr argument: must be 'on' or 'off'");
         }
+    }
+    else if ( strcmp(tokens[1], "bid") == 0 )
+    {
+        if ( strlen(tokens[2]) > MAX_BOARD_ID_SZ )
+            strncpy(EEPROMData.boardID, tokens[2], MAX_BOARD_ID_SZ - 1);
+        else
+            strcpy(EEPROMData.boardID, tokens[2]);
     }
     else
     {
-        SerialUSB.println("Invalid parameter name");
+        SHOW("Invalid parameter name");
+        setCmdHelp();
         return(1);
     }
 
     if ( isDirty )
+    {
         EEPROM_Save();
+        SHOW("Saved change(s) in EEPROM");
+    }
 
     return(0);
 }
@@ -906,13 +978,9 @@ int setK(int arg)
 //                      EEPROM/NVM Stuff
 //===================================================================
 
-// --------------------------------------------
-// EEPROM_Save() - write EEPROM structure to
-// the EEPROM
-// --------------------------------------------
 /**
-  * @name   
-  * @brief  
+  * @name   EEPROM_Save
+  * @brief  write EEPROM structure to EEPROM
   * @param  None
   * @retval None
   */
@@ -929,12 +997,9 @@ void EEPROM_Save(void)
     EEPROM.commit();
 }
 
-// --------------------------------------------
-// EEPROM_Read() - Read struct from EEPROM
-// --------------------------------------------
 /**
-  * @name   
-  * @brief  
+  * @name   EEPROM_Read
+  * @brief  read EEPROM into structure
   * @param  None
   * @retval None
   */
@@ -949,12 +1014,9 @@ void EEPROM_Read(void)
     }
 }
 
-// --------------------------------------------
-// EEPROM_Defaults() - Set defaults in struct
-// --------------------------------------------
 /**
-  * @name   
-  * @brief  
+  * @name   EEPROM_Defaults
+  * @brief  Set EEPROM defaults
   * @param  None
   * @retval None
   */
@@ -962,25 +1024,22 @@ void EEPROM_Defaults(void)
 {
     EEPROMData.sig = EEPROM_signature;
     EEPROMData.K = 1.0;
+    strcpy(EEPROMData.calibDate, "01/01/1970");
+    strcpy(EEPROMData.boardID, "Vulcan 1");
     EEPROMData.enCorrection = false;
     EEPROMData.gainError = 1400;
     EEPROMData.offsetError = -69;
 }
 
-// --------------------------------------------
-// EEPROM_InitLocal() - Initialize EEPROM & Data
-//
-// Returns false if no error, else true
-// --------------------------------------------
 /**
-  * @name   
-  * @brief  
+  * @name   EEPROM_InitLocal
+  * @brief  Initialize EEPROM & data
   * @param  None
-  * @retval None
+  * @retval true if EEPROM OK on reset, false if failed
   */
 bool EEPROM_InitLocal(void)
 {
-    bool          rc = false;
+    bool          rc = true;
 
     EEPROM_Read();
 
@@ -990,29 +1049,28 @@ bool EEPROM_InitLocal(void)
       // initialize the signature and settings
 
       // FIXME: When debugging, EEPROM fails every time, but it
-      // is OK over resets and power cycles.  
+      // is OK over resets and power cycles.  THis is because
+      // the area in FLASH where the EEPROM is simulated is
+      // erased for debugging 
       EEPROM_Defaults();
 
       // save EEPROM data on the deVout_Intensityce
       EEPROM_Save();
 
-      rc = true;
-      SerialUSB.println("EEPROM validation FAILED, EEPROM initialized OK");
+      rc = false;
+      SHOW("EEPROM validation FAILED, EEPROM initialized OK");
     }
     else
     {
-      SerialUSB.println("EEPROM validated OK");
+      SHOW("EEPROM validated OK");
     }
 
     return(rc);
 }
 
-//===================================================================
-//                      setup() - Initialization
-//===================================================================
 /**
-  * @name   
-  * @brief  
+  * @name   setup
+  * @brief  POR Initialization
   * @param  None
   * @retval None
   */
@@ -1057,33 +1115,26 @@ void setup()
   }
 
   // initialize system & libraries
-  EEPROM_InitLocal();
+  if ( EEPROM_InitLocal() == false )
+  {
+      calibRequired = true;
+  }
+
   ADC_Init();
   Wire.begin();
 
-  SerialUSB.println(" ");
-  SerialUSB.print(hello);
-  SerialUSB.println(versString);
+  sprintf(outBfr, "%s %s", hello, versString);
+  SHOWX();
   doPrompt();
 
 } // setup()
 
-//===================================================================
-//                     loop() - Main Program Loop
-//
-// FLASHING NOTE: loop() doesn't get called until USB-serial connection
-// has been established (ie, SerialUSB = 1).
-//
-// This loop does two things: blink the heartbeat LED and handle
-// incoming characters over SerialUSB connection.  Once a full CR
-// terminated input line has been received, it calls the CLI to
-// parse and execute any valid command, or sends an error message.
-//===================================================================
 /**
-  * @name   
-  * @brief  
+  * @name   loop
+  * @brief  main program loop
   * @param  None
   * @retval None
+  * @note   blinks LED and handles incoming characters from user 
   */
 void loop() 
 {
@@ -1110,18 +1161,20 @@ void loop()
       if ( byteIn == 0x0a )
       {
           // line feed - echo it
-          SerialUSB.println(byteIn);
+          SerialUSB.write(0x0a);
+          SerialUSB.flush();
       }
       else if ( byteIn == 0x0d )
       {
           // carriage return - EOL 
           // save as the last cmd (for up arrow) and call CLI with
           // the completed line less CR/LF
-          SerialUSB.println(" ");
+          SHOW(" ");
           inBfr[inCharCount] = 0;
           inCharCount = 0;
           strcpy(lastCmd, inBfr);
           cli(inBfr);
+          SerialUSB.flush();
       }
       else if ( byteIn == 0x1b )
       {
@@ -1136,7 +1189,7 @@ void loop()
                     byteIn = SerialUSB.read();
                     if ( byteIn == 'A' )
                     {
-                        SerialUSB.println(lastCmd);
+                        SHOW(lastCmd);
                         cli(lastCmd);
                     }
                 }
