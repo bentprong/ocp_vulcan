@@ -4,23 +4,34 @@ Written by Richard Lewis rlewis@astlenterprises.com for Fusion Manufacturing Ser
 Posted January 15, 2023 at https://github.com/bentprong/ocp_vulcan
 Initial Firmware Release: v1.2.1
 
-## Release v1.3.0 April 25, 2023
-1. Updated CLI and help to be clearer
-2. Completed the calibration process (green LED only)
+## Release v1.3.0 Notes - April 26, 2023
+1. Updated CLI and help to be clearer to the user
+2. Completed the automatic calibration process function (green LED only)
 3. Updated color & intensity equations 
 4. Added the 'vers' command to show the firmware version and build date/time
-5. Wrapped SerialUSB.print[ln] to help with dropped characters on USB terminal
+5. Wrapped SerialUSB.print[ln] to address dropped characters on USB terminal
 6. Replaced function headers with doxygen style blocks
-7. Fixed compiler warnings
-8. Changed ADC internal gain from ADC_INPUTCTRL_GAIN_DIV2 to ADC_INPUTCTRL_GAIN_1X which is what
-it originally was, but it was changed during ADC debug and never changed back.  Now the fiwmare
-ADC gain of 2 is correct - due to the voltage divider resistors R1/R2 and R3/R4
+7. Fixed compiler warnings (except in Arduino libraries those won't be fixed)
+8. Changed ADC internal gain from ADC_INPUTCTRL_GAIN_DIV2 to ADC_INPUTCTRL_GAIN_2X which is what
+it originally was, but it was changed during ADC debug and never changed back.  Now the firwmare
+ADC gain of 1.0 is correct.  Gain necessary due to the voltage divider resistors R1/R2 and R3/R4
+which divides the Spectra output range 5V-0 to 2.5V to 0.  
 9. *** IMPORTANT NOTE *** The op amp U1 must be removed for proper operation of the board.  There
 is an issue when the input to the op amp falls below 1.0V - the output goes up.  After removing
-the op amp, short U1 pads 1-3 and 5-7 INx => OUTx (x=a,b)
+the op amp, short U1 pads 1-3 and 5-7 ie INx => OUTx (x=a,b) for both signals.
+10. Added range checking on calculated K constant to detect if the sensor is misaligned or if
+the user is using a different calibration LED than the required green LED.
+11. Added a user-settable board ID parameter to the EEPROM.  Can be set with 'set bid <ID>'.
+12. Added flag calibRequired that when true requires sensor calibration; flag is true if board
+has never been programmed or if board was erased during programming/debugging. 
+13. Added a flag sensorGood that when true, indicates that the sensor has been calibrated and 
+the K constant validated.
+14. Added a user-settable calibration date that is prompted during the calibration process.
 
-Overview
-========
+## Known Issues
+1. Sometimes the prompt fails to output; workaround: hit the ENTER key.
+
+## Overview
 These instructions have been tested on Windows and Mac.  If you are using a variant of Linux, the
 instructions for Mac should apply except possibly for the "screen" terminal emulator program.  At
 a minimum you need to select a Linux terminal emulation program and open the USB TTY with it.
@@ -47,16 +58,18 @@ With ADC oversampling/averaging, the ADC was finishing way faster than the time 
 voltage to stabilize.  So software averaging over a longer period solves that problem.  Same
 applied to the auto correction - ADC was too fast for the sensor.
 
-Operating Instructions
-======================
+## Operating Instructions
 Important Note:  The LED sensor must be calibrated using the 'calib' cmd before using the
-Led Test Fixture to measure LEDs.  When the calibration is complete, the K constant from the calibration
-will automatically be saved to EEPROM.  At the "ltf>" prompt, enter this
-command to set and save the K constant manually (not recommended unless the board was erased):
+Led Test Fixture to measure LEDs.  When the calibration is complete, the K constant from the 
+calibration will automatically be saved to EEPROM.  
+
+To save the K constant manually, at the "ltf>" prompt, enter this command to set and save 
+the K constant manually (not recommended unless the board was erased and the EEPROM K
+value erased):
     set k 9.999<ENTER>
 
 To confirm that the constant has been stored in EEPROM, enter this command:
-    debug eeprom<ENTER>
+    xdebug eeprom<ENTER>
 
 Here is an example setting and confirming the K constant to a value of 99.89 (<ENTER> not shown):
 ltf> set k 99.89  
@@ -64,25 +77,35 @@ ltf> set k 99.89
 ltf> xdebug eeprom 
 EEPROM Contents:
 Signature:     DE110C01
-K Constant:    12.89 (example K it varies with each Spectra probe)
+K Constant:     11.0220    <== NOTE: This constant varies between boards/sensors
+Board ID:      Vulcan 1
+Calib Date:    04/26/23    <== user is prompted for this date during calibration process
+ADC Correct:   Disabled
 
-The signature should always be DE110C01.  Other data may be shown that is not relevant to use of
-the board to measure LEDs.
+The signature should always be DE110C01.  The ADC correction is disabled because it is no longer
+required.
+
+To set the board ID, use this command:
+    set bid <text_here_with_underscores_not_spaces>
+
+Example: set bid LAB_TEST_1
+
+Note that if you don't use and underscore you will get a CLI error for too many arguments. The
+default value for board ID is 'Vulcan 1'.
 
 --------------------------------------------------------------------------------------------------
 WARNING: Loading the board with (new) firmware WILL erase the EEPROM and you will need to re-enter
-the K constant afterwards.  The board may display "EEPROM Validation Failed..." to indicate that
+some parameters afterwards.  The board may display "EEPROM Validation Failed..." to indicate that
 this has happened, but it is a good practice to always enter the K constant after flashing the
-board's firmware.  The default value of K is 100.0 which may not work with an uncalibrated LED
+board's firmware.  The default value of K is 10.0 which may not work with an uncalibrated LED
 sensor.  Tip: write the K constant on the board in permanent marker.
 --------------------------------------------------------------------------------------------------
 
-Tips:
+## Tips
 Backspace and delete are implemented and erase the previous character typed.
 Up arrow executes the previous command.
 
-Getting Started
-===============
+## Getting Started
 Follow the Wiring and Terminal Instructions below to get started using the Vulcan board.
 
 The board firmware prompt is "ltf>" and when you see that, you can enter "help<ENTER>" for help on the
@@ -101,8 +124,7 @@ You may also want to read the temperature of the board. To do that enter "temp<E
     ltf> temp 
     Board temp: 23 C/73 F
 
-Development Environment Setup
-=============================
+## Development Environment Setup
 
 This varies slightly between platforms including Mac, Linux and Windows.
 
@@ -142,8 +164,7 @@ and tools.  It may take quite a bit of time.
 7. In the repo folder platformio, open the README file and follow the instructions to configure PIO for the
 Vulcan board.  There are 2 steps to this process explained in the README.
 
-Wiring Instructions
-===================
+## Wiring Instructions
 1. Connect Vulcan board to ATMEL-ICE and connect ATMEL-ICE to computer (debug only)
 2. Connect Vulcan board USB-C port to computer USB port using a DATA CABLE (not a charging only cable).
 3. Windows only: If not already installed, install a terminal emulator program such as TeraTerm.
@@ -166,13 +187,11 @@ If the 3rd LED is off, the board firmware never started up.   The firmware turns
 first starts, then it initializes itself and the harware, then it starts fast blinking unless errors
 were encountered.
 
-Build/Debug Instructions
-========================
+## Build/Debug Instructions
 In VSC, click Run | Start Debugging.  The code will be built for debug and you should see the debugger
 stop in main() at the init() call.   Click the blue |> icon in the debugger control area of VSC.
 
-Binary Executable Instructions
-==============================
+## Binary Executable Instructions
 In VSC, click the checkmark in the blue line at the bottom to build a firmware release.  If no problems
 are reported (there should be none), the executable is located here:
     <home>/Projects/ocp-vulcan/.pio/build/samd21g18a/firmware.bin
@@ -183,8 +202,7 @@ Use any flash utility such as Microchip Studio to erase and burn this .bin file 
 
 NOTE: PIO "upload" does not work, because there is intentionally no bootloader on the Vulcan board.
 
-Microchip Studio
-----------------
+## Microchip Studio
 1. Open Studio then select Tools | Device Programming.
 2. Select Atmel-ICE from the Tool pulldown menu.  Verify that the Device is ATSAMD21G18A then click
 the Apply button.  A menu of options will appear on the left of the screen now.
@@ -201,8 +219,7 @@ NOTE:  There may be a conflict between VSC and Microchip Studio if you are tryin
 flash the firmware.  Close out VSC and Studio, then restart Studio.  The conflict would be in these
 2 software programs trying to use the Atmel-ICE at the same time.
 
-Terminal Instructions
-=====================
+## Terminal Instructions
 Windows: In TeraTerm, open a new serial connection on the new COM port and press ENTER. You should see
 the Vulcan welcome message and Vulcan prompt ltf> in the TeraTerm window.
 
@@ -217,9 +234,4 @@ Linux (eg Ubuntu): You can install screen or minicom using apt.  For screen, use
 screen /dev/ttyUSB0 115200 if the connection is on ttyUSB0. Check the /dev directory for any
 matches to ttyUSB*.
 
-Known Issues
-============
-1. Some characters are lost sometimes in the serial terminal.  Workaround: execute the command again.
-
-
-
+** end **

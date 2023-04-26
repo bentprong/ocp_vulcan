@@ -79,15 +79,21 @@ typedef struct {
 const char      hello[] = "\r\nOCP Vulcan LED Text Fixture (LTF) V ";
 const char      cliPrompt[] = "ltf> ";
 const int       promptLen = sizeof(cliPrompt);
-const float     ADCGain = 2.0;
+
+// ADC
+const float     ADCGain = 1.0;          // deprecated; gain now set in ADC config
 const float     ADCVrefA = 2.5;
 const float     voltsPerCount = ADCVrefA / 4095.0;
+
+// EEPROM (Sim) signature uniquely identifying Vulcan board
 const uint32_t  EEPROM_signature = 0xDE110C01;
 
 // calibration data for use with 1P5KH calibration board rev  X00
 // that board is marked '2.7' on bottom of small PCB glued to blue board
-const float     amberLED_Intensity = 7.53;
-const float     amberLED_Wavelength = 584.5;
+// NOTE: amber constants are not used because we only calibrate to the
+// green LED.
+const float     amberLED_Intensity = 7.53;        // NOT USED
+const float     amberLED_Wavelength = 584.5;      // NOT USED
 const float     greenLED_Intensity = 45.8;
 const float     greenLED_Wavelength = 526.8;
 
@@ -95,8 +101,7 @@ const float     greenLED_Wavelength = 526.8;
 uint16_t        ADC_resultsArray[ADC_OVERSAMPLE_COUNT+1];
 char            outBfr[OUTBFR_SIZE];
 bool            calibRequired = false;
-
-// FLASH/EEPROM Data buffer
+bool            sensorGood = false;
 EEPROM_data_t   EEPROMData;
 
 // --------------------------------------------
@@ -133,13 +138,13 @@ led_meas_t      currentMeasurement;
 // format is "command", function, required arg count, "help line 1", "help line 2" (2nd line can be NULL)
 const cli_entry     cmdTable[] = {
     {"calib",     calib,  0, "Calibrate board LED sensor",                     "Uses LTF Calibration Board LEDs"},
-    {"check",  readLoop,  0, "Continuous loop reading raw sensor data.",       "Hit any key to exit loop."},
+    {"check",  readLoop,  0, "Continuous loop reading Spectra sensor data.",   "Hit any key to exit loop."},
     {"help",       help,  0, "THIS DOES NOT DISPLAY ON PURPOSE",               " "},
     {"read",    readCmd,  0, "Read LED color temperature and intensity.",      " "},
-    {"set",      setCmd,  2, "Sets value of a stored parameter.",              "eg 'set k 1.234' sets K constant to 1.234"},
+    {"set",      setCmd, -1, "Sets value of a stored parameter.",              "enter 'set' with no argument for more help"},
     {"temp",   readTemp,  0, "Read board (not MCU core) temperature sensor.",  "Reports temperature in degrees C and F."},
     {"vers",    versCmd,  0, "Shows firmware version information.",            " "},
-    {"xdebug",    debug, -1, "Debug functions mostly for developer use.",      "'xdebug reset' resets board; 'xdebug eeprom' dumps EEPROM"},
+    {"xdebug",    debug, -1, "Debug functions mostly for developer use.",      "enter 'xdebug' with no argument for more help"},
 };
 
 #define CLI_ENTRIES     (sizeof(cmdTable) / sizeof(cli_entry))
@@ -317,7 +322,8 @@ int calib(int arg)
     int           keyPressed;
     led_meas_t    data;
     float         temp_K;
-    char          *s;
+    const char    *s;
+    float         tolLow, tolHigh;
 
     SHOW("Power up the LTF Calibration Board and select the GREEN LED now.");
     SHOW("Align the Spectra probe with the GREEN calibration LED.");
@@ -334,6 +340,8 @@ int calib(int arg)
     {
         strcpy(EEPROMData.calibDate, s);
         EEPROM_Save();
+        sprintf(outBfr, "Saved calibration date of %s in EEPROM", s);
+        SHOWX();
     }
 
     SHOW("Starting measurements, please wait...");
@@ -348,10 +356,59 @@ int calib(int arg)
     sprintf(outBfr, "Calculated K = %f", temp_K);
     SHOWX();
 
+    if ( temp_K < 6.0 || temp_K > 25.0 )
+    {
+      SHOW("K is out of range; adjust the sensor position and re-try.");
+      SHOW("Also, be sure you are using the green LED on the calibration board");
+      return(1);
+    }
+
     EEPROMData.K = temp_K;
     EEPROM_Save();
     SHOW("K stored in EEPROM");
     calibRequired = false;
+    sensorGood = false;
+
+    // read the sensor and check values
+    // preferred tolerance +/- 5%
+    SHOW("Checking LED sensor data...");
+    ledRawRead(&data);
+
+    tolLow = greenLED_Intensity * 0.95;
+    tolHigh = greenLED_Intensity * 1.05;
+    if ( data.intensity >= tolLow && data.intensity <= tolHigh )
+    {
+        s = "within";
+        sensorGood = true;
+    }
+    else
+    {
+        s = "outside";
+    }
+
+    sprintf(outBfr, "Intensity of %5.1f mcd is %s 5%% tolerance to spec %5.1f mcd", data.intensity, s, greenLED_Intensity);
+    SHOWX();
+
+    tolLow = greenLED_Wavelength * 0.95;
+    tolHigh = greenLED_Wavelength * 1.05;
+    if ( data.wavelength >= tolLow && data.wavelength <= tolHigh )
+    {
+        s = "within";
+    }
+    else
+    {
+        s = "outside";
+        sensorGood = false;
+    }
+
+    sprintf(outBfr, "Color of %5.1f nm is %s 5%% tolerance to spec %5.1f nm", data.wavelength, s, greenLED_Wavelength);
+    SHOWX();
+
+    if ( sensorGood )
+      SHOW("Spectra sensor is calibrated and ready to use");
+    else
+      SHOW("Sensor needs alignment and/or further calibration");
+
     return(0);
 }
 
@@ -582,7 +639,9 @@ void ADC_Init(void)
 
   // adjust sample time for possible input impediance (allow ADC to charge cap)
   ADC->SAMPCTRL.reg = ADC_SAMPCTRL_SAMPLEN(1);
-  ADC->INPUTCTRL.reg = ADC_INPUTCTRL_GAIN_1X; // ADC_INPUTCTRL_GAIN_DIV2;
+
+  // set ADC gain to compensate for voltage divider resistors R1/R2 and R3/R4
+  ADC->INPUTCTRL.reg = ADC_INPUTCTRL_GAIN_2X;
   syncADC();
 
   if ( EEPROMData.enCorrection )
@@ -706,9 +765,9 @@ int readCmd(int arg)
 {
     led_meas_t          *m = &currentMeasurement;
 
-    if ( calibRequired == true )
+    if ( calibRequired == true || sensorGood == false )
     {
-        SHOW("Spectra probe requires calibration before use; use 'calib' command now.");
+        SHOW("Spectra sensor requires calibration before use; use 'calib' command now.");
         return(1);
     }
 
@@ -770,9 +829,9 @@ int readTemp(int arg)
   */
 int readLoop(int arg)
 {
-  if ( calibRequired == true )
+  if ( calibRequired == true || sensorGood == false )
   {
-      SHOW("Spectra probe requires calibration before use; use 'calib' command now.");
+      SHOW("Spectra sensor requires calibration before use; use 'calib' command now.");
       return(1);
   }
 
@@ -872,7 +931,7 @@ void setCmdHelp(void)
 {
     SHOW("Set command help; format 'set <param> <value>'");
     SHOW("'set K 12.345' sets LED K constant to 12.345");
-    SHOW("'set bid 3' sets board ID to 3 (can also have chars eg 'MY BD 3'");
+    SHOW("'set bid 3' sets board ID to 3 or 'MY_BD_3' use underscore not space!");
 }
 
 /**
@@ -896,6 +955,12 @@ int setCmd(int argCnt)
         setCmdHelp();
         return(0);
     }
+    else if ( argCnt != 2 )
+    {
+        SHOW("Not enough arguments");
+        setCmdHelp();
+        return(1);
+    }
 
     if ( strcmp(parameter, "k") == 0 )
     {
@@ -906,51 +971,52 @@ int setCmd(int argCnt)
           isDirty = true;
         }
     }
-    else if ( strcmp(parameter, "gain") == 0 )
-    {
-        // set ADC gain error
-        iValue = userEntry.toInt();
-        if (EEPROMData.gainError != iValue )
-        {
-          isDirty = true;
-          EEPROMData.gainError = iValue;
-        }
-    }
-    else if ( strcmp(parameter, "offset") == 0 )
-    {
-        // set ADC offset error
-        iValue = userEntry.toInt();
-        if (EEPROMData.offsetError != iValue )
-        {
-          isDirty = true;
-          EEPROMData.offsetError = iValue;
-        }
-    }
-    else if ( strcmp(parameter, "corr") == 0 )
-    {
-        // set ADC corr on|off
-        if ( strcmp(tokens[2], "off") == 0 )
-        {
-          if ( EEPROMData.enCorrection == true )
-          {
-              EEPROMData.enCorrection = false;
-              SHOW("ADC correction off");
-              isDirty = true;
-          }
-        }
-        else if ( strcmp(tokens[2], "on") == 0 )
-        {
-            if ( EEPROMData.enCorrection == false )
-            {
-                EEPROMData.enCorrection = true;
-                isDirty = true;
-            }
-        }
-        else
-        {
-          SHOW("Invalid ADC corr argument: must be 'on' or 'off'");
-        }
-    }
+    // disabled because ADC doesn't require this after op amp removed
+    // else if ( strcmp(parameter, "gain") == 0 )
+    // {
+    //     // set ADC gain error
+    //     iValue = userEntry.toInt();
+    //     if (EEPROMData.gainError != iValue )
+    //     {
+    //       isDirty = true;
+    //       EEPROMData.gainError = iValue;
+    //     }
+    // }
+    // else if ( strcmp(parameter, "offset") == 0 )
+    // {
+    //     // set ADC offset error
+    //     iValue = userEntry.toInt();
+    //     if (EEPROMData.offsetError != iValue )
+    //     {
+    //       isDirty = true;
+    //       EEPROMData.offsetError = iValue;
+    //     }
+    // }
+    // else if ( strcmp(parameter, "corr") == 0 )
+    // {
+    //     // set ADC corr on|off
+    //     if ( strcmp(tokens[2], "off") == 0 )
+    //     {
+    //       if ( EEPROMData.enCorrection == true )
+    //       {
+    //           EEPROMData.enCorrection = false;
+    //           SHOW("ADC correction off");
+    //           isDirty = true;
+    //       }
+    //     }
+    //     else if ( strcmp(tokens[2], "on") == 0 )
+    //     {
+    //         if ( EEPROMData.enCorrection == false )
+    //         {
+    //             EEPROMData.enCorrection = true;
+    //             isDirty = true;
+    //         }
+    //     }
+    //     else
+    //     {
+    //       SHOW("Invalid ADC corr argument: must be 'on' or 'off'");
+    //     }
+    // }
     else if ( strcmp(tokens[1], "bid") == 0 )
     {
         if ( strlen(tokens[2]) > MAX_BOARD_ID_SZ )
@@ -1023,9 +1089,11 @@ void EEPROM_Read(void)
 void EEPROM_Defaults(void)
 {
     EEPROMData.sig = EEPROM_signature;
-    EEPROMData.K = 1.0;
+    EEPROMData.K = 10.0;      // NOTE: This is never used because the board MUST be calibrated before use
     strcpy(EEPROMData.calibDate, "01/01/1970");
     strcpy(EEPROMData.boardID, "Vulcan 1");
+
+    // left in for legacy purposes but not used and cannot be enabled via CLI
     EEPROMData.enCorrection = false;
     EEPROMData.gainError = 1400;
     EEPROMData.offsetError = -69;
@@ -1046,12 +1114,12 @@ bool EEPROM_InitLocal(void)
     if ( EEPROMData.sig != EEPROM_signature )
     {
       // EEPROM failed: either never been used, or real failure
-      // initialize the signature and default settings
+      // so initialize the signature and set default settings
 
       // When debugging, EEPROM fails every time, but it
       // is OK over resets and power cycles.  This is because
       // the area in FLASH where the EEPROM is simulated is
-      // erased for debugging 
+      // erased for debugging and programming
       EEPROM_Defaults();
 
       // save EEPROM data on the device
@@ -1059,6 +1127,7 @@ bool EEPROM_InitLocal(void)
 
       rc = false;
       SHOW("EEPROM validation FAILED, EEPROM initialized with defaults");
+      SHOW("Sensor calibration will be required prior to reading Spectra data");
     }
     else
     {
@@ -1094,12 +1163,17 @@ void setup()
   PORT->Group[1].PMUX[3].reg = PORT_PMUX_PMUXO_B;
   PORT->Group[1].PMUX[4].reg = PORT_PMUX_PMUXO_B;
 
-  // TODO configure ADC AREFA pin
-
   // configure heartbeat LED pin and turn on which indicates that the
   // board is being initialized
   pinMode(PIN_LED, OUTPUT);
   digitalWrite(PIN_LED, LEDstate);
+
+  // configure PA19 & PA20 as board ID; we don't use the UART and
+  // it is crucial that we identify a board as re-worked with the
+  // op amp removed.   So jumpering P_UART1 1-2 will do that.
+  // Pin 6 = PA20; Pin 10 = PA19
+  pinMode(6, INPUT);
+  pinMode(10, INPUT);
 
   // start serial over USB and wait for a connection
   // NOTE: Baud rate isn't applicable to USB but...
@@ -1118,10 +1192,23 @@ void setup()
   if ( EEPROM_InitLocal() == false )
   {
       calibRequired = true;
+      sensorGood = false;
   }
 
   ADC_Init();
   Wire.begin();
+
+  if ( digitalRead(6) == 0 )
+  {
+      SHOW("Board rev 0 is not supported.  Remove the op amp and jumper");
+      SHOW("U1 pads 1-3 and U1 pads 5-7 and P_UART1 pins 1-2 then reboot.");
+      SHOW("Board startup halted.");
+      while ( true ) ;
+  }
+  else
+  {
+      SHOW("Board rev 1 detected");
+  }
 
   sprintf(outBfr, "%s %s", hello, versString);
   SHOWX();
