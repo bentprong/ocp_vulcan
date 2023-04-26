@@ -63,7 +63,7 @@
 
 // LEDs
 // ----
-#define PIN_LED     (1u)
+#define PIN_LED     (13u)
 #define LED_BUILTIN PIN_LED
 
 // Analog pins
@@ -89,8 +89,9 @@ static const uint8_t DAC0 = PIN_DAC0;
 
 // SPI Interfaces
 // --------------
-#define SPI_INTERFACES_COUNT 2
+#define SPI_INTERFACES_COUNT 0
 
+#if 0
 // SPI
 #define PIN_SPI_MISO  (10u)
 #define PIN_SPI_MOSI  (8u)
@@ -104,6 +105,7 @@ static const uint8_t MOSI = PIN_SPI_MOSI;
 static const uint8_t MISO = PIN_SPI_MISO;
 static const uint8_t SCK  = PIN_SPI_SCK;
 
+
 // SPI1: Connected to WINC1501B
 #define PIN_SPI1_MISO (29u)
 #define PIN_SPI1_MOSI (26u)
@@ -116,6 +118,7 @@ static const uint8_t SS1   = PIN_SPI1_SS;
 static const uint8_t MOSI1 = PIN_SPI1_MOSI;
 static const uint8_t MISO1 = PIN_SPI1_MISO;
 static const uint8_t SCK1  = PIN_SPI1_SCK;
+#endif
 
 // Wire Interfaces
 // ---------------
@@ -124,8 +127,8 @@ static const uint8_t SCK1  = PIN_SPI1_SCK;
 // Wire
 #define PIN_WIRE_SDA        (11u)
 #define PIN_WIRE_SCL        (12u)
-#define PERIPH_WIRE         sercom0
-#define WIRE_IT_HANDLER     SERCOM0_Handler
+#define PERIPH_WIRE         sercom2
+#define WIRE_IT_HANDLER     SERCOM2_Handler
 static const uint8_t SDA = PIN_WIRE_SDA;
 static const uint8_t SCL = PIN_WIRE_SCL;
 

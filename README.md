@@ -234,4 +234,11 @@ Linux (eg Ubuntu): You can install screen or minicom using apt.  For screen, use
 screen /dev/ttyUSB0 115200 if the connection is on ttyUSB0. Check the /dev directory for any
 matches to ttyUSB*.
 
+## Testing
+In the docs subdirectory of this repo are some pictures of the test fixture I threw together. The
+primary goal being to stabilize the Spectra probe over the LED on the calibration board.  I also
+made a "light shield" to reduce ambient light (cut a finger off of an old glove).  Finally, I
+modified the calibration board by cutting a notch so that the probe rests right against the LED.
+Prior to that, there was nothing to keep the probe close.  Thus, the air gap is very tiny.  I 
+also included the constants picture for calibration LED #27.
 ** end **
